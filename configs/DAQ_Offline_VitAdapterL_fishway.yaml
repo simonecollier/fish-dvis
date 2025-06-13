@@ -1,0 +1,72 @@
+_BASE_: ../DVIS_Plus/DVIS_DAQ/configs/dvis_daq/ytvis21/vit_adapter/DAQ_Offline_VitAdapterL.yaml  # file to inherit settings from
+
+MODEL:
+  META_ARCHITECTURE: "DVIS_DAQ_offline"   # offline mode tracks all frames at once
+  BACKBONE:
+    NAME: "D2VitAdapterDinoV2"  # DINOv2 pre-trained ViT adapter as backbone
+  VIT_ADAPTER:
+    FINETUNE: True  # choose to fine tune the adapter
+    NAME: 'vitl'
+    VIT_WEIGHT: '/home/simone/checkpoints/dinov2_vitl14_pretrain.pth'   # path to pre-trained weights
+    FREEZE_VIT: True  # choose to freeze the main ViT backbone (trains only the adapter)
+    FINETUNE_INDEXES: [3]   # choose which adapters to fine-tune... which layer
+  SEM_SEG_HEAD:
+    NUM_CLASSES: 6  # 6 fish species + background
+    IGNORE_VALUE: 255   # pixels labeled 255 are ignored during loss computation
+    LOSS_WEIGHT: 1.0 
+    NORM: "GN"
+    CONVS_DIM: 256
+    MASK_DIM: 256
+    PIXEL_DECODER_NAME: "MSDeformAttnPixelDecoder"
+  MASK_FORMER:
+    NUM_OBJECT_QUERIES: 200 # max instances per frame
+    CLASS_WEIGHT: 2.0
+    MASK_WEIGHT: 5.0
+    DICE_WEIGHT: 5.0
+    TEST:
+      TASK: 'vis'  # video instance segmentation task
+      WINDOW_INFERENCE: True  # run inference on small frame windows for memory savings
+      WINDOW_SIZE: 5
+      MAX_NUM: 10   # limits how many instances are predicted per frame
+  VIDEO_HEAD:
+    NUM_NEW_INS: 200
+    TRAINING_SELECT_THRESHOLD: 0.02   # threshold for selecting confident detections during training
+    INFERENCE_SELECT_THRESHOLD: 0.01  # threshold for selecting confident detections during inference
+    AUX_INFERENCE_SELECT_THRESHOLD: 0.01
+    OFFLINE_TOPK_NUM: 10
+    USE_LOCAL_ATTN: True
+
+DATASETS:
+  DATASET_RATIO: [1.0]
+  DATASET_NEED_MAP: [False]
+  DATASET_TYPE: ['video_instance']
+  TRAIN: ("ytvis_fishway_train",)
+  TEST: ("ytvis_fishway_val",)
+
+SOLVER:
+  IMS_PER_BATCH: 1  # Adjust based on your GPU memory (out of memory with 10)
+  BASE_LR: 0.00005  # learning rate... keep low for fine funring
+  STEPS: (56, 72)     # Reduced schedule for fine-tuning
+  MAX_ITER: 80     # Fewer iterations needed for fine-tuning
+  WARMUP_ITERS: 4   # Gentle start to prevent destroying pre-trained features
+  CHECKPOINT_PERIOD: 10  # Save more frequently
+  BACKBONE_MULTIPLIER: 0.1  # Slower learning rate for backbone
+
+INPUT:
+  MIN_SIZE_TRAIN: (400, 500, 600)
+  MAX_SIZE_TRAIN: 800
+  MIN_SIZE_TEST: 400
+  MAX_SIZE_TEST: 600
+  SAMPLING_FRAME_NUM: 6
+  SAMPLING_FRAME_RANGE: 3
+  REVERSE_AGU: True
+  RANDOM_FLIP: "flip_by_clip"  # Ensure consistent augmentation within clips
+  FORMAT: "RGB"
+  MIN_SIZE_TRAIN_SAMPLING: "choice" 
+
+DATALOADER:
+  FILTER_EMPTY_ANNOTATIONS: True
+  NUM_WORKERS: 0  # Reduced from 4 to improve stability
+  ASPECT_RATIO_GROUPING: False  # Disable for video data  
+
+OUTPUT_DIR: './output_fishway_dvis_daq_vitl_offline_coho_chinook'
