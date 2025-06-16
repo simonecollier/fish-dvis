@@ -46,9 +46,9 @@ from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.utils.logger import setup_logger
 
 # Models
-from mask2former import add_maskformer2_config
-from mask2former_video import add_maskformer2_video_config
-from dvis_Plus import (
+from DVIS_Plus.DVIS_DAQ.mask2former import add_maskformer2_config
+from DVIS_Plus.DVIS_DAQ.mask2former_video import add_maskformer2_video_config
+from DVIS_Plus.DVIS_DAQ.dvis_Plus import (
     YTVISDatasetMapper,
     CocoClipDatasetMapper,
     PanopticDatasetVideoMapper,
@@ -66,9 +66,9 @@ from dvis_Plus import (
     SOTDatasetMapper,
 )
 
-from dvis_daq.config import add_daq_config
+from DVIS_Plus.DVIS_DAQ.dvis_daq.config import add_daq_config
 
-from custom_data.register_datasets import register_all_ytvis_fishway
+from data_scripts.ytvis_loader import register_all_ytvis_fishway
 
 class Trainer(DefaultTrainer):
     """
