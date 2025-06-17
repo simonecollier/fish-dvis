@@ -46,9 +46,9 @@ from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.utils.logger import setup_logger
 
 # Models
-from DVIS_Plus.DVIS_DAQ.mask2former import add_maskformer2_config
-from DVIS_Plus.DVIS_DAQ.mask2former_video import add_maskformer2_video_config
-from DVIS_Plus.DVIS_DAQ.dvis_Plus import (
+from mask2former import add_maskformer2_config
+from mask2former_video import add_maskformer2_video_config
+from dvis_Plus import (
     YTVISDatasetMapper,
     CocoClipDatasetMapper,
     PanopticDatasetVideoMapper,
@@ -66,9 +66,10 @@ from DVIS_Plus.DVIS_DAQ.dvis_Plus import (
     SOTDatasetMapper,
 )
 
-from DVIS_Plus.DVIS_DAQ.dvis_daq.config import add_daq_config
+from dvis_daq.config import add_daq_config
 
-from data_scripts.ytvis_loader import register_all_ytvis_fishway
+#from data_scripts.ytvis_loader import register_all_ytvis_fishway
+from dvis_Plus.data_video.datasets.ytvis import register_ytvis_instances
 
 class Trainer(DefaultTrainer):
     """
@@ -304,7 +305,18 @@ def setup(args):
     cfg.merge_from_list(args.opts)
 
     # Register custom datasets
-    register_all_ytvis_fishway()
+    register_ytvis_instances(
+        "ytvis_fishway_train",
+        {},
+        "/data/fishway_ytvis/train.json",
+        "/data/fishway_ytvis/train"
+    )
+    register_ytvis_instances(
+        "ytvis_fishway_val",
+        {},
+        "/data/fishway_ytvis/val.json",
+        "/data/fishway_ytvis/val"
+    )
 
     cfg.freeze()
     default_setup(cfg, args)
