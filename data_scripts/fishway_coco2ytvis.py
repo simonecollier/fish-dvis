@@ -4,6 +4,44 @@ import shutil
 import pandas as pd
 from collections import defaultdict
 from tqdm import tqdm
+from pycocotools import mask as mask_utils
+import numpy as np
+
+def decode_rle(rle):
+    """
+    Decode RLE mask encoding, handling empty masks.
+    """
+    if not isinstance(rle, dict) or not rle:
+        return np.array([])
+    
+    # Check for empty counts
+    if not rle.get('counts', []):
+        return np.array([])
+    
+    decoded_mask = mask_utils.decode({
+        'size': rle['size'],
+        'counts': bytes(rle['counts']) if isinstance(rle['counts'][0], int) else rle['counts']
+    })
+    return decoded_mask
+
+def convert_all_segmentations_to_compressed_rle(ytvis_json):
+    for ann in ytvis_json["annotations"]:
+        segs = ann.get("segmentations", [])
+        for i, seg in enumerate(segs):
+            if isinstance(seg, dict) and isinstance(seg.get("counts", None), list):
+                # try:
+                #     # Try to decode the mask (works if counts is valid uncompressed RLE)
+                #     mask = mask_utils.decode(seg)
+                # except Exception as e:
+                #     print(f"Failed to decode RLE: {e}")
+                #     continue
+                # Re-encode as compressed RLE
+                mask = decode_rle(seg)
+                compressed = mask_utils.encode(np.asfortranarray(mask))
+                compressed["counts"] = compressed["counts"].decode("ascii")
+                segs[i] = compressed
+        ann["segmentations"] = segs
+    return ytvis_json
 
 def convert_coco_to_ytvis(
     train_or_val_df,
@@ -114,22 +152,25 @@ def convert_coco_to_ytvis(
                 track_anns[tid]["bboxes"][trimmed_frame_idx] = ann.get("bbox", None)
                 track_anns[tid]["areas"][trimmed_frame_idx] = ann.get("area", None)
                 track_anns[tid]["category_id"] = ann["category_id"]
+                track_anns[tid]["iscrowd"] = ann["iscrowd"]
 
         for track_id, info in track_anns.items():
             ytvis["annotations"].append({
                 "id": annotation_id_counter,
                 "video_id": video_id,
                 "category_id": info["category_id"],
-                "segmentations": info["segmentations"],
-                "bboxes": info["bboxes"],
-                "areas": info["areas"],
-                "score": 1.0,  # GT annotations
                 "height": images[0]["height"],  # required
                 "width": images[0]["width"],    # required
-                "length": num_frames_trimmed    # required
+                "length": num_frames_trimmed,    # required
+                "score": 1.0,  # GT annotations
+                "iscrowd": info["iscrowd"],
+                "segmentations": info["segmentations"],
+                "bboxes": info["bboxes"],
+                "areas": info["areas"],        
             })
             annotation_id_counter += 1
 
+    ytvis = convert_all_segmentations_to_compressed_rle(ytvis)
     # Save final YTVIS JSON
     with open(final_json_path, "w") as f:
         json.dump(ytvis, f, indent=2)
@@ -171,7 +212,7 @@ def validate_ytvis(json_path):
         print("❌ Errors found in JSON.")
 
 
-csv_path = "/home/simone/LO_Fishway_Labelling/fishway_metadata.csv"
+csv_path = "/home/simone/fish-dvis/data_scripts/fishway_metadata.csv"
 
 # Step 1: Load and filter
 df = pd.read_csv(csv_path)
@@ -189,15 +230,15 @@ train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
 convert_coco_to_ytvis(
     train_df,
     base_data_dir="/data/labeled",
-    output_dir="/home/simone/shared-data/fishway_ytvis/train",
-    final_json_path="/home/simone/shared-data/fishway_ytvis/train.json"
+    output_dir="/data/fishway_ytvis/train",
+    final_json_path="/data/fishway_ytvis/train.json"
 )
 
 convert_coco_to_ytvis(
     val_df,
     base_data_dir="/data/labeled",
-    output_dir="/home/simone/shared-data/fishway_ytvis/val",
-    final_json_path="/home/simone/shared-data/fishway_ytvis/val.json"
+    output_dir="/data/fishway_ytvis/val",
+    final_json_path="/data/fishway_ytvis/val.json"
 )
 
 # Run this on your train/val json
