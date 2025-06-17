@@ -403,14 +403,18 @@ if __name__ == "__main__":
 
     logger = setup_logger(name=__name__)
     #assert sys.argv[3] in DatasetCatalog.list()
-    meta = MetadataCatalog.get("ytvis_2019_train")
+    meta = MetadataCatalog.get("ytvis_fishway_train")
 
-    json_file = "./datasets/ytvis/instances_train_sub.json"
-    image_root = "./datasets/ytvis/train/JPEGImages"
-    dicts = load_ytvis_json(json_file, image_root, dataset_name="ytvis_2019_train")
+    json_file = "/data/fishway_ytvis/train.json"
+    image_root = "/data/fishway_ytvis/train"
+    dicts = load_ytvis_json(json_file, image_root, dataset_name="ytvis_fishway_train")
+
+    # import pprint
+    # pprint.pprint(dicts[5]["annotations"][:10])
+
     logger.info("Done loading {} samples.".format(len(dicts)))
 
-    dirname = "ytvis-data-vis"
+    dirname = "fishway-data-vis"
     os.makedirs(dirname, exist_ok=True)
 
     def extract_frame_dic(dic, frame_idx):
