@@ -50,6 +50,7 @@ def load_ytvis_json(json_file, image_root, dataset_name):
         for ann in [a for a in ytvis["annotations"] if a["video_id"] == video["id"]]:
             track_id = ann["id"]
             category_id = ann["category_id"]
+            iscrowd = ann["iscrowd"]
             segs = ann["segmentations"]
             bboxes = ann.get("bboxes", [None] * length)
             areas = ann.get("areas", [None] * length)
@@ -85,7 +86,7 @@ def load_ytvis_json(json_file, image_root, dataset_name):
                     "segmentation": seg,
                     "bbox": [x1, y1, x2, y2],
                     "bbox_mode": BoxMode.XYXY_ABS,
-                    "iscrowd": 0,
+                    "iscrowd": iscrowd,
                 }
                 video_dict["annotations"][frame_idx].append(ann_per_frame)
 
@@ -123,3 +124,31 @@ def register_ytvis_instances(name, metadata, json_file, image_root):
         thing_dataset_id_to_contiguous_id={c["id"]: i for i, c in enumerate(sorted(cats, key=lambda x: x["id"]))},
         **metadata
     )
+
+def register_all_ytvis_fishway(root="/data/fishway_ytvis"):
+    """
+    Register all YTVIS-format Fishway datasets
+    """
+    SPLITS = [
+        ("ytvis_fishway_train", "train", "train.json"),
+        ("ytvis_fishway_val", "val", "val.json"),
+    ]
+    
+    for name, image_root, json_file in SPLITS:
+        json_path = os.path.join(root, json_file)
+        image_path = os.path.join(root, image_root)
+        
+        # Debug print to verify paths
+        print(f"Registering {name}:")
+        print(f"  JSON: {json_path}")
+        print(f"  Images: {image_path}")
+        
+        register_ytvis_instances(
+            name,
+            {
+                "min_size": 1,
+            },
+            json_path,
+            image_path
+        )
+        
