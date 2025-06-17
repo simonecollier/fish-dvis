@@ -13,60 +13,60 @@ MODEL:
   SEM_SEG_HEAD:
     NUM_CLASSES: 6  # 6 fish species + background
     IGNORE_VALUE: 255   # pixels labeled 255 are ignored during loss computation
-    LOSS_WEIGHT: 1.0 
-    NORM: "GN"
-    CONVS_DIM: 256
-    MASK_DIM: 256
+    LOSS_WEIGHT: 1.0  # weight for the segmentation loss
+    NORM: "GN"  # normalization type for the segmentation head (GN = group normalization)
+    CONVS_DIM: 256  # dimension of the convolutional layers (number of channels) in the segmentation head
+    MASK_DIM: 256  # number of channels in the mask prediction head
     PIXEL_DECODER_NAME: "MSDeformAttnPixelDecoder"
   MASK_FORMER:
     NUM_OBJECT_QUERIES: 200 # max instances per frame
-    CLASS_WEIGHT: 2.0
-    MASK_WEIGHT: 5.0
-    DICE_WEIGHT: 5.0
+    CLASS_WEIGHT: 2.0  # weight for the classification loss
+    MASK_WEIGHT: 5.0  # weight for the mask loss
+    DICE_WEIGHT: 5.0  # weight for the dice loss
     TEST:
       TASK: 'vis'  # video instance segmentation task
       WINDOW_INFERENCE: True  # run inference on small frame windows for memory savings
-      WINDOW_SIZE: 5
+      WINDOW_SIZE: 3  # size of the window for inference
       MAX_NUM: 10   # limits how many instances are predicted per frame
   VIDEO_HEAD:
-    NUM_NEW_INS: 200
-    TRAINING_SELECT_THRESHOLD: 0.02   # threshold for selecting confident detections during training
-    INFERENCE_SELECT_THRESHOLD: 0.01  # threshold for selecting confident detections during inference
-    AUX_INFERENCE_SELECT_THRESHOLD: 0.01
-    OFFLINE_TOPK_NUM: 10
-    USE_LOCAL_ATTN: True
+    NUM_NEW_INS: 200  # maximum number of new instances to consider per frame
+    TRAINING_SELECT_THRESHOLD: 0.02   # confidence threshold for selecting detections during training
+    INFERENCE_SELECT_THRESHOLD: 0.01  # confidence threshold for selecting detections during inference
+    AUX_INFERENCE_SELECT_THRESHOLD: 0.01  # confidence threshold for selecting detections during auxiliary inference
+    OFFLINE_TOPK_NUM: 10  # number of top detections to consider for offline tracking
+    USE_LOCAL_ATTN: True  # use local attention for inference in the video head
 
 DATASETS:
-  DATASET_RATIO: [1.0]
-  DATASET_NEED_MAP: [False]
-  DATASET_TYPE: ['video_instance']
-  TRAIN: ("ytvis_fishway_train",)
-  TEST: ("ytvis_fishway_val",)
+  DATASET_RATIO: [1.0] # Ratio for mixing multiple datasets (1.0 means use all of this dataset)
+  DATASET_NEED_MAP: [False]  # whether the dataset needs category mapping (False = no mapping needed)... This is not needed for YTVisFishway
+  DATASET_TYPE: ['video_instance']  # type of dataset (video_instance = video instance segmentation)
+  TRAIN: ("ytvis_fishway_train",)  # training dataset
+  TEST: ("ytvis_fishway_val",)  # testing dataset
 
 SOLVER:
-  IMS_PER_BATCH: 1  # Adjust based on your GPU memory (out of memory with 10)
-  BASE_LR: 0.00005  # learning rate... keep low for fine funring
-  STEPS: (56, 72)     # Reduced schedule for fine-tuning
-  MAX_ITER: 80     # Fewer iterations needed for fine-tuning
-  WARMUP_ITERS: 4   # Gentle start to prevent destroying pre-trained features
-  CHECKPOINT_PERIOD: 10  # Save more frequently
-  BACKBONE_MULTIPLIER: 0.1  # Slower learning rate for backbone
+  IMS_PER_BATCH: 1  # Images per batch... Adjust based on your GPU memory (try 3 for training)
+  BASE_LR: 0.00005  # base learning rate... keep low for fine tuning
+  STEPS: (420, 560)     # Iterations at which the learning rate is decreased... (usually 60% and 80% of MAX_ITER)
+  MAX_ITER: 700     # Maximim number of training iterations... ([num_vids * num_epochs]/IMS_PER_BATCH)
+  WARMUP_ITERS: 14   # Number of iterations for learning rate warmup... (usually 2% of MAX_ITER)
+  CHECKPOINT_PERIOD: 20  # How often (in iterations) to save checkpoints... Save more frequently
+  BACKBONE_MULTIPLIER: 0.1  # Multiplier for the learning rate of the backbone... Slower learning rate for backbone
 
 INPUT:
-  MIN_SIZE_TRAIN: (400, 500, 600)
-  MAX_SIZE_TRAIN: 800
-  MIN_SIZE_TEST: 400
-  MAX_SIZE_TEST: 600
-  SAMPLING_FRAME_NUM: 6
-  SAMPLING_FRAME_RANGE: 3
-  REVERSE_AGU: True
-  RANDOM_FLIP: "flip_by_clip"  # Ensure consistent augmentation within clips
-  FORMAT: "RGB"
-  MIN_SIZE_TRAIN_SAMPLING: "choice" 
+  MIN_SIZE_TRAIN: (360, 480) # shorter side of of images is resized to one of these values during training
+  MIN_SIZE_TRAIN_SAMPLING: "choice" # how to sample the minimum size of the images during training (choice = randomly choose one of the values in MIN_SIZE_TRAIN)
+  MAX_SIZE_TRAIN: 640 # longer side is capped at this value during training
+  MIN_SIZE_TEST: 360 # shorter side of of images is resized to this value during testing
+  MAX_SIZE_TEST: 640 # longer side is capped at this value during testing
+  SAMPLING_FRAME_NUM: 8 # number of frames to sample from each video clip during training (each epoch samples a different clip from each video)
+  SAMPLING_FRAME_RANGE: 4 # how many frames to sample before and after the reference frame
+  REVERSE_AGU: True # whether to randomly reverse the order of the frames for augmentation
+  RANDOM_FLIP: "flip_by_clip"  # type of random flip augmentation (flip_by_clip = flip all frames in a clip the same way)
+  FORMAT: "RGB" # color format of the images (RGB = red, green, blue)
 
 DATALOADER:
-  FILTER_EMPTY_ANNOTATIONS: True
-  NUM_WORKERS: 0  # Reduced from 4 to improve stability
-  ASPECT_RATIO_GROUPING: False  # Disable for video data  
+  FILTER_EMPTY_ANNOTATIONS: True # whether to filter out images with no annotations
+  NUM_WORKERS: 0  # Number of workers for data loading... Set to 0 for inference, 4 for training
+  ASPECT_RATIO_GROUPING: False  # whether to group images by aspect ratio... Disable for video data  
 
-OUTPUT_DIR: './output_fishway_dvis_daq_vitl_offline_coho_chinook'
+OUTPUT_DIR: './dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids'
