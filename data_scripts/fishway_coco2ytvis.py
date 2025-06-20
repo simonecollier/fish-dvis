@@ -6,6 +6,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from pycocotools import mask as mask_utils
 import numpy as np
+import random
 
 def decode_rle(rle):
     """
@@ -44,13 +45,11 @@ def convert_all_segmentations_to_compressed_rle(ytvis_json):
     return ytvis_json
 
 def convert_coco_to_ytvis(
-    train_or_val_df,
+    df,
     base_data_dir,
     output_dir,
     final_json_path
 ):
-    df = train_or_val_df
-
     # Step 2: Create output directories
     os.makedirs(output_dir, exist_ok=True)
     image_out_dir = os.path.join(output_dir)
@@ -71,6 +70,7 @@ def convert_coco_to_ytvis(
     track_to_anns = defaultdict(list)
 
     first_categories_loaded = False
+    used_cat_ids = set()
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
         annotator = row["Mask Annotator Name"].strip().lower()
@@ -168,9 +168,12 @@ def convert_coco_to_ytvis(
                 "bboxes": info["bboxes"],
                 "areas": info["areas"],        
             })
+            used_cat_ids.add(info["category_id"])
             annotation_id_counter += 1
 
     ytvis = convert_all_segmentations_to_compressed_rle(ytvis)
+    # Filter categories to only those present in the annotations
+    ytvis["categories"] = [cat for cat in ytvis["categories"] if cat["id"] in used_cat_ids]
     # Save final YTVIS JSON
     with open(final_json_path, "w") as f:
         json.dump(ytvis, f, indent=2)
@@ -222,9 +225,34 @@ df = df[
     (df["train/val/test"] == "train")
 ]
 
-# Step 2: Split into train/val (e.g., 80/20 split by video)
-from sklearn.model_selection import train_test_split
-train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
+# --- New logic for val split: two random videos per present category ---
+video_to_categories = defaultdict(set)
+present_categories = set()
+
+for _, row in tqdm(df.iterrows(), total=len(df)):
+    annotator = row["Mask Annotator Name"].strip().lower()
+    video_folder = row["Fish Computer Folder"]
+    rel_path = os.path.join(annotator, video_folder)
+    video_path = os.path.join("/data/labeled", rel_path)
+    ann_path = os.path.join(video_path, "annotations", "edited_instances_default.json")
+    if not os.path.exists(ann_path):
+        continue
+    with open(ann_path) as f:
+        coco = json.load(f)
+    for ann in coco["annotations"]:
+        cat_id = ann["category_id"]
+        present_categories.add(cat_id)
+        video_to_categories[video_folder].add(cat_id)
+
+val_videos = set()
+for cat_id in present_categories:
+    videos_with_cat = [v for v, cats in video_to_categories.items() if cat_id in cats]
+    num_to_select = min(2, len(videos_with_cat))
+    if num_to_select > 0:
+        val_videos.update(random.sample(videos_with_cat, num_to_select))
+
+val_df = df[df["Fish Computer Folder"].isin(val_videos)]
+train_df = df[~df["Fish Computer Folder"].isin(val_videos)]
 
 # Step 3: Write to separate YTVIS JSONs
 convert_coco_to_ytvis(
@@ -244,3 +272,47 @@ convert_coco_to_ytvis(
 # Run this on your train/val json
 validate_ytvis("/data/fishway_ytvis/train.json")
 validate_ytvis("/data/fishway_ytvis/val.json")
+
+def create_tiny_overfit_jsons(train_json_path, val_json_path, out_train_json, out_val_json, category_id=2):
+    """
+    Create tiny YTVIS JSONs for overfitting:
+    - 2 videos with category_id == 2 for train
+    - 1 video with category_id == 2 for val
+    - Only category 2 in categories
+    """
+    import copy
+    for src_path, out_path, num_videos in [
+        (train_json_path, out_train_json, 2),
+        (val_json_path, out_val_json, 1)
+    ]:
+        with open(src_path, 'r') as f:
+            data = json.load(f)
+        # Find all videos with at least one annotation of category_id
+        vids_with_cat = set(
+            ann['video_id'] for ann in data['annotations'] if ann['category_id'] == category_id
+        )
+        vids_with_cat = list(vids_with_cat)
+        vids_with_cat = vids_with_cat[:num_videos]
+        # Filter videos
+        videos = [v for v in data['videos'] if v['id'] in vids_with_cat]
+        # Filter annotations
+        anns = [ann for ann in data['annotations'] if ann['video_id'] in vids_with_cat and ann['category_id'] == category_id]
+        # Find the category info for category_id
+        cat_info = [cat for cat in data['categories'] if cat['id'] == category_id]
+        # Build new json
+        new_json = {
+            'videos': videos,
+            'annotations': anns,
+            'categories': cat_info,
+            'info': data.get('info', {}),
+            'licenses': data.get('licenses', [])
+        }
+        with open(out_path, 'w') as f:
+            json.dump(new_json, f, indent=2)
+        print(f"Wrote tiny overfit json to {out_path}")
+
+# create_tiny_overfit_jsons(train_json_path="/data/fishway_ytvis/train.json", 
+#                           val_json_path="/data/fishway_ytvis/val.json", 
+#                           out_train_json="/data/fishway_ytvis/train_tiny.json", 
+#                           out_val_json="/data/fishway_ytvis/val_tiny.json", 
+#                           category_id=2)
