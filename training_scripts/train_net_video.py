@@ -34,6 +34,7 @@ from detectron2.engine import (
     default_argument_parser,
     default_setup,
     launch,
+    hooks
 )
 from detectron2.evaluation import (
     DatasetEvaluator,
@@ -314,7 +315,7 @@ def setup(args):
     register_ytvis_instances(
         "ytvis_fishway_val",
         {},
-        "/data/fishway_ytvis/val.json",
+        "/data/fishway_ytvis/val_trimmed.json",
         "/data/fishway_ytvis/val"
     )
 
@@ -343,6 +344,13 @@ def main(args):
 
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
+
+    # # Add periodic validation evaluation
+    # eval_period = 800  # or any value you like
+    # trainer.register_hooks([
+    #     hooks.EvalHook(eval_period, lambda: Trainer.test(cfg, trainer.model))
+    # ])
+
     return trainer.train()
 
 

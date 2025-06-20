@@ -69,4 +69,4 @@ DATALOADER:
   # NUM_WORKERS: 2  # Number of workers for data loading... Set to 0 for inference, 4 for training
   # ASPECT_RATIO_GROUPING: False  # whether to group images by aspect ratio... Disable for video data  
 
-OUTPUT_DIR: '/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids'
+OUTPUT_DIR: '/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k'
