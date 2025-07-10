@@ -1,7 +1,7 @@
 import json
 import matplotlib.pyplot as plt
 
-metrics_path = "/home/simone/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids/metrics.json"
+metrics_path = "/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/metrics.json"
 
 iterations = []
 losses = []
@@ -17,4 +17,5 @@ plt.plot(iterations, losses)
 plt.xlabel("Iteration")
 plt.ylabel("Total Loss")
 plt.title("Training Loss Curve")
-plt.show()
+plt.savefig("/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/training_loss_curve.png")
+# plt.show()
