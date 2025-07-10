@@ -45,11 +45,18 @@ def convert_all_segmentations_to_compressed_rle(ytvis_json):
     return ytvis_json
 
 def convert_coco_to_ytvis(
-    df,
+    metadata_csv_path,
     base_data_dir,
     output_dir,
     final_json_path
 ):
+    # Step 1: Load and filter metadata
+    df = pd.read_csv(metadata_csv_path)
+    df = df[
+        (df["mask annotated"] == 1) &
+        (df["Mask Annotator Name"].isin(["Simone", "Bushra"]))
+    ]
+
     # Step 2: Create output directories
     os.makedirs(output_dir, exist_ok=True)
     image_out_dir = os.path.join(output_dir)
@@ -104,55 +111,30 @@ def convert_coco_to_ytvis(
         video_id_counter += 1
         video_name_to_id[video_folder] = video_id
 
-        # --- TRIMMING LOGIC STARTS HERE ---
-        # Group annotations by track_id
         num_frames = len(images)
         image_id_to_idx = {img["id"]: i for i, img in enumerate(images)}
-        frame_has_ann = [False] * num_frames
-        for ann in coco["annotations"]:
-            frame_idx = image_id_to_idx[ann["image_id"]]
-            frame_has_ann[frame_idx] = True
-
-        # Find first and last frame with annotation
-        try:
-            first_anno = frame_has_ann.index(True)
-            last_anno = len(frame_has_ann) - 1 - frame_has_ann[::-1].index(True)
-        except ValueError:
-            # No annotation in this video, skip it
-            print(f"Skipping video {video_folder}: no annotated frames.")
-            continue
-
-        # Trim images and filenames
-        images = images[first_anno:last_anno+1]
-        image_filenames = image_filenames[first_anno:last_anno+1]
-        num_frames_trimmed = len(images)
-        image_id_to_idx_trimmed = {img["id"]: i for i, img in enumerate(images)}
-
-        # --- TRIMMING LOGIC ENDS HERE ---
 
         ytvis["videos"].append({
             "id": video_id,
             "file_names": image_filenames,
             "width": images[0]["width"],
             "height": images[0]["height"],
-            "length": num_frames_trimmed,
+            "length": num_frames,
             "coco_url": "",
             "flickr_url": "",
             "date_captured": ""
         })
 
-        # Group annotations by track_id for trimmed frames
-        track_anns = defaultdict(lambda: {"segmentations": [None]*num_frames_trimmed, "bboxes": [None]*num_frames_trimmed, "areas": [None]*num_frames_trimmed, "category_id": None})
+        # Group annotations by track_id for all frames (no trimming)
+        track_anns = defaultdict(lambda: {"segmentations": [None]*num_frames, "bboxes": [None]*num_frames, "areas": [None]*num_frames, "category_id": None})
         for ann in coco["annotations"]:
             tid = ann["attributes"]["track_id"]
-            orig_frame_idx = image_id_to_idx[ann["image_id"]]
-            trimmed_frame_idx = orig_frame_idx - first_anno
-            if 0 <= trimmed_frame_idx < num_frames_trimmed:
-                track_anns[tid]["segmentations"][trimmed_frame_idx] = ann["segmentation"]
-                track_anns[tid]["bboxes"][trimmed_frame_idx] = ann.get("bbox", None)
-                track_anns[tid]["areas"][trimmed_frame_idx] = ann.get("area", None)
-                track_anns[tid]["category_id"] = ann["category_id"]
-                track_anns[tid]["iscrowd"] = ann["iscrowd"]
+            frame_idx = image_id_to_idx[ann["image_id"]]
+            track_anns[tid]["segmentations"][frame_idx] = ann["segmentation"]
+            track_anns[tid]["bboxes"][frame_idx] = ann.get("bbox", None)
+            track_anns[tid]["areas"][frame_idx] = ann.get("area", None)
+            track_anns[tid]["category_id"] = ann["category_id"]
+            track_anns[tid]["iscrowd"] = ann["iscrowd"]
 
         for track_id, info in track_anns.items():
             ytvis["annotations"].append({
@@ -161,9 +143,10 @@ def convert_coco_to_ytvis(
                 "category_id": info["category_id"],
                 "height": images[0]["height"],  # required
                 "width": images[0]["width"],    # required
-                "length": num_frames_trimmed,    # required
+                "length": num_frames,    # required
                 "score": 1.0,  # GT annotations
                 "iscrowd": info["iscrowd"],
+                "occ_score": 0.0,
                 "segmentations": info["segmentations"],
                 "bboxes": info["bboxes"],
                 "areas": info["areas"],        
@@ -178,6 +161,140 @@ def convert_coco_to_ytvis(
     with open(final_json_path, "w") as f:
         json.dump(ytvis, f, indent=2)
     print(f"Saved YTVIS JSON to {final_json_path}")
+
+
+def create_train_val_jsons(
+    all_vids_json,
+    output_train_json,
+    output_val_json,
+    categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic"],
+    exclude_empty_train=True,
+    balance=True,
+    num_vids_val=2,
+    num_vids_train=None,
+    frame_skip=0,
+    random_seed=None
+):
+    """
+    Create train and val YTVIS JSONs from a big all-videos YTVIS JSON.
+    - categories_to_include: list of category names to include
+    - exclude_empty_train: if True, trim empty frames from train set
+    - balance: if True, balance number of videos per class
+    - num_vids_val: number of videos per class for val set
+    - num_vids_train: number of videos per class for train set (None = as many as possible)
+    - frame_skip: 0 = include every frame, 1 = every 2nd frame, 2 = every 3rd frame, etc.
+    - random_seed: if set, ensures reproducible splits
+    """
+    import copy
+    if random_seed is not None:
+        random.seed(random_seed)
+    with open(all_vids_json, 'r') as f:
+        data = json.load(f)
+    # Map category names to ids
+    cat_name_to_id = {cat['name']: cat['id'] for cat in data['categories']}
+    cat_id_to_name = {cat['id']: cat['name'] for cat in data['categories']}
+    cat_ids = [cat_name_to_id[name] for name in categories_to_include if name in cat_name_to_id]
+    # Find videos for each category
+    video_to_cats = defaultdict(set)
+    for ann in data['annotations']:
+        if ann['category_id'] in cat_ids:
+            video_to_cats[ann['video_id']].add(ann['category_id'])
+    # Build val set
+    val_videos = set()
+    for cat_id in cat_ids:
+        vids = [vid for vid, cats in video_to_cats.items() if cat_id in cats]
+        vids = list(set(vids) - val_videos)  # avoid overlap
+        num = min(num_vids_val, len(vids))
+        if balance:
+            vids = random.sample(vids, num) if num > 0 else []
+        else:
+            vids = vids[:num]
+        val_videos.update(vids)
+    # Build train set
+    train_videos = set([vid for vid in video_to_cats if vid not in val_videos])
+    if balance:
+        # For each class, sample up to num_vids_train (or min count if None)
+        vids_per_cat = {cat_id: [vid for vid in train_videos if cat_id in video_to_cats[vid]] for cat_id in cat_ids}
+        if num_vids_train is None:
+            min_count = min(len(v) for v in vids_per_cat.values())
+        else:
+            min_count = num_vids_train
+        balanced_train_videos = set()
+        for cat_id, vids in vids_per_cat.items():
+            n = min(min_count, len(vids))
+            if n > 0:
+                balanced_train_videos.update(random.sample(vids, n))
+        train_videos = balanced_train_videos
+    # Filter videos/annotations for train/val
+    def filter_json(videoset, trim_empty):
+        vids = [v for v in data['videos'] if v['id'] in videoset]
+        anns = [a for a in data['annotations'] if a['video_id'] in videoset and a['category_id'] in cat_ids]
+        # Optionally trim empty frames (for train)
+        if trim_empty:
+            # For each video, find frames with at least one annotation
+            vid_to_frames_with_ann = defaultdict(set)
+            for ann in anns:
+                for idx, seg in enumerate(ann['segmentations']):
+                    if seg is not None:
+                        vid_to_frames_with_ann[ann['video_id']].add(idx)
+            # Trim frames for each video
+            new_vids = []
+            new_anns = []
+            for v in vids:
+                frames_with_ann = vid_to_frames_with_ann[v['id']]
+                if not frames_with_ann:
+                    continue
+                first = min(frames_with_ann)
+                last = max(frames_with_ann)
+                # Trim file_names and update length
+                v_new = copy.deepcopy(v)
+                v_new['file_names'] = v_new['file_names'][first:last+1]
+                v_new['length'] = len(v_new['file_names'])
+                new_vids.append(v_new)
+                # Trim segmentations/bboxes/areas for each annotation
+                for ann in [a for a in anns if a['video_id'] == v['id']]:
+                    ann_new = copy.deepcopy(ann)
+                    ann_new['segmentations'] = ann_new['segmentations'][first:last+1]
+                    ann_new['bboxes'] = ann_new['bboxes'][first:last+1]
+                    ann_new['areas'] = ann_new['areas'][first:last+1]
+                    ann_new['length'] = len(ann_new['segmentations'])
+                    new_anns.append(ann_new)
+            vids = new_vids
+            anns = new_anns
+        # Apply frame skipping
+        if frame_skip > 0:
+            def skip_frames(seq):
+                return seq[::frame_skip+1]
+            # For videos
+            for v in vids:
+                v['file_names'] = skip_frames(v['file_names'])
+                v['length'] = len(v['file_names'])
+            # For annotations
+            for ann in anns:
+                ann['segmentations'] = skip_frames(ann['segmentations'])
+                ann['bboxes'] = skip_frames(ann['bboxes'])
+                ann['areas'] = skip_frames(ann['areas'])
+                ann['length'] = len(ann['segmentations'])
+        return vids, anns
+    train_vids, train_anns = filter_json(train_videos, trim_empty=exclude_empty_train)
+    val_vids, val_anns = filter_json(val_videos, trim_empty=False)
+    # Build output jsons
+    def build_json(vids, anns):
+        used_cat_ids = set(a['category_id'] for a in anns)
+        cats = [cat for cat in data['categories'] if cat['id'] in used_cat_ids]
+        return {
+            'videos': vids,
+            'annotations': anns,
+            'categories': cats,
+            'info': data.get('info', {}),
+            'licenses': data.get('licenses', [])
+        }
+    with open(output_train_json, 'w') as f:
+        json.dump(build_json(train_vids, train_anns), f, indent=2)
+    with open(output_val_json, 'w') as f:
+        json.dump(build_json(val_vids, val_anns), f, indent=2)
+    print(f"Wrote train json to {output_train_json}")
+    print(f"Wrote val json to {output_val_json}")
 
 
 def validate_ytvis(json_path):
@@ -215,104 +332,26 @@ def validate_ytvis(json_path):
         print("❌ Errors found in JSON.")
 
 
-csv_path = "/home/simone/fish-dvis/data_scripts/fishway_metadata.csv"
+if __name__ == "__main__":
+    convert_coco_to_ytvis(
+        metadata_csv_path="/home/simone/fish-dvis/data_scripts/fishway_metadata.csv",
+        base_data_dir="/data/labeled",
+        output_dir="/data/fishway_ytvis/all_videos",
+        final_json_path="/data/fishway_ytvis/all_videos.json"
+    )
 
-# Step 1: Load and filter
-df = pd.read_csv(csv_path)
-df = df[
-    (df["mask annotated"] == 1) &
-    (df["Mask Annotator Name"].isin(["Simone", "Bushra"])) &
-    (df["train/val/test"] == "train")
-]
+    create_train_val_jsons(
+        all_vids_json="/data/fishway_ytvis/all_videos.json",
+        output_train_json="/data/fishway_ytvis/train.json",
+        output_val_json="/data/fishway_ytvis/val.json",
+        categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic"],
+        exclude_empty_train=True,
+        balance=True,
+        num_vids_val=2,
+        num_vids_train=None,
+        frame_skip=3
+    )
 
-# --- New logic for val split: two random videos per present category ---
-video_to_categories = defaultdict(set)
-present_categories = set()
-
-for _, row in tqdm(df.iterrows(), total=len(df)):
-    annotator = row["Mask Annotator Name"].strip().lower()
-    video_folder = row["Fish Computer Folder"]
-    rel_path = os.path.join(annotator, video_folder)
-    video_path = os.path.join("/data/labeled", rel_path)
-    ann_path = os.path.join(video_path, "annotations", "edited_instances_default.json")
-    if not os.path.exists(ann_path):
-        continue
-    with open(ann_path) as f:
-        coco = json.load(f)
-    for ann in coco["annotations"]:
-        cat_id = ann["category_id"]
-        present_categories.add(cat_id)
-        video_to_categories[video_folder].add(cat_id)
-
-val_videos = set()
-for cat_id in present_categories:
-    videos_with_cat = [v for v, cats in video_to_categories.items() if cat_id in cats]
-    num_to_select = min(2, len(videos_with_cat))
-    if num_to_select > 0:
-        val_videos.update(random.sample(videos_with_cat, num_to_select))
-
-val_df = df[df["Fish Computer Folder"].isin(val_videos)]
-train_df = df[~df["Fish Computer Folder"].isin(val_videos)]
-
-# Step 3: Write to separate YTVIS JSONs
-convert_coco_to_ytvis(
-    train_df,
-    base_data_dir="/data/labeled",
-    output_dir="/data/fishway_ytvis/train",
-    final_json_path="/data/fishway_ytvis/train.json"
-)
-
-convert_coco_to_ytvis(
-    val_df,
-    base_data_dir="/data/labeled",
-    output_dir="/data/fishway_ytvis/val",
-    final_json_path="/data/fishway_ytvis/val.json"
-)
-
-# Run this on your train/val json
-validate_ytvis("/data/fishway_ytvis/train.json")
-validate_ytvis("/data/fishway_ytvis/val.json")
-
-def create_tiny_overfit_jsons(train_json_path, val_json_path, out_train_json, out_val_json, category_id=2):
-    """
-    Create tiny YTVIS JSONs for overfitting:
-    - 2 videos with category_id == 2 for train
-    - 1 video with category_id == 2 for val
-    - Only category 2 in categories
-    """
-    import copy
-    for src_path, out_path, num_videos in [
-        (train_json_path, out_train_json, 2),
-        (val_json_path, out_val_json, 1)
-    ]:
-        with open(src_path, 'r') as f:
-            data = json.load(f)
-        # Find all videos with at least one annotation of category_id
-        vids_with_cat = set(
-            ann['video_id'] for ann in data['annotations'] if ann['category_id'] == category_id
-        )
-        vids_with_cat = list(vids_with_cat)
-        vids_with_cat = vids_with_cat[:num_videos]
-        # Filter videos
-        videos = [v for v in data['videos'] if v['id'] in vids_with_cat]
-        # Filter annotations
-        anns = [ann for ann in data['annotations'] if ann['video_id'] in vids_with_cat and ann['category_id'] == category_id]
-        # Find the category info for category_id
-        cat_info = [cat for cat in data['categories'] if cat['id'] == category_id]
-        # Build new json
-        new_json = {
-            'videos': videos,
-            'annotations': anns,
-            'categories': cat_info,
-            'info': data.get('info', {}),
-            'licenses': data.get('licenses', [])
-        }
-        with open(out_path, 'w') as f:
-            json.dump(new_json, f, indent=2)
-        print(f"Wrote tiny overfit json to {out_path}")
-
-# create_tiny_overfit_jsons(train_json_path="/data/fishway_ytvis/train.json", 
-#                           val_json_path="/data/fishway_ytvis/val.json", 
-#                           out_train_json="/data/fishway_ytvis/train_tiny.json", 
-#                           out_val_json="/data/fishway_ytvis/val_tiny.json", 
-#                           category_id=2)
+    validate_ytvis("/data/fishway_ytvis/all_videos.json")
+    validate_ytvis("/data/fishway_ytvis/train.json")
+    validate_ytvis("/data/fishway_ytvis/val.json")
