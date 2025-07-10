@@ -6,6 +6,9 @@ import csv
 from skimage import measure
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import pandas as pd
 
 def load_json(path):
     with open(path, 'r') as f:
@@ -135,7 +138,7 @@ def compute_ap_at_iou(pred_by_video, gt_dict, iou_threshold, category_id):
         
     return ap
 
-def main(results_json, val_json, csv_path="mask_metrics.csv"):
+def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="confusion_matrix.png"):
     preds = load_json(results_json)
     gts = load_json(val_json)
 
@@ -152,7 +155,7 @@ def main(results_json, val_json, csv_path="mask_metrics.csv"):
     # Group predictions by video_id
     pred_by_video = defaultdict(list)
     for pred in preds:
-        if pred.get('category_id') in gt_category_ids and pred.get('score', 0) >= 0.7:
+        if pred.get('category_id') in gt_category_ids:
             vid = pred['video_id']
             pred_by_video[vid].append(pred)
 
@@ -163,6 +166,29 @@ def main(results_json, val_json, csv_path="mask_metrics.csv"):
     video_fmeasures = {}
 
     video_ids = set(list(gt_dict.keys()) + list(pred_by_video.keys()))
+    # Prepare per-video prediction info
+    video_pred_info = {}
+    for video_id in video_ids:
+        preds_for_video = pred_by_video.get(video_id, [])
+        if preds_for_video:
+            best_pred = max(preds_for_video, key=lambda p: p.get('score', 0.0))
+            pred_cat_id = best_pred.get('category_id', None)
+            pred_cat_name = gt_category_names.get(pred_cat_id, f"ID {pred_cat_id}")
+            pred_score = best_pred.get('score', 0.0)
+        else:
+            pred_cat_id = None
+            pred_cat_name = None
+            pred_score = None
+        gt_cat_ids = sorted(set(ann['category_id'] for ann in gt_dict.get(video_id, [])))
+        gt_cat_names = [gt_category_names.get(cid, f"ID {cid}") for cid in gt_cat_ids]
+        video_pred_info[video_id] = {
+            'predicted_category_id': pred_cat_id,
+            'predicted_category_name': pred_cat_name,
+            'predicted_score': pred_score,
+            'gt_category_ids': gt_cat_ids,
+            'gt_category_names': gt_cat_names
+        }
+
     for video_id in tqdm(video_ids, desc="Processing videos"):
         video_frame_ious_per_video = []
         video_frame_fmeasures_per_video = []
@@ -277,19 +303,34 @@ def main(results_json, val_json, csv_path="mask_metrics.csv"):
     dataset_iou = np.mean(list(video_ious.values())) if video_ious else 0.0
     dataset_fmeasure = np.mean(list(video_fmeasures.values())) if video_fmeasures else 0.0
 
-    # Compute mAP@0.5 and mAP@0.75
+    # Compute mAP@0.5, mAP@0.75, mAP@0.25, and mAP@0.95
+    map25_scores = []
     map50_scores = []
     map75_scores = []
+    map95_scores = []
+    ap_per_category = {}
     for cat_id in gt_category_ids:
+        ap25 = compute_ap_at_iou(pred_by_video, gt_dict, 0.25, cat_id)
         ap50 = compute_ap_at_iou(pred_by_video, gt_dict, 0.5, cat_id)
         ap75 = compute_ap_at_iou(pred_by_video, gt_dict, 0.75, cat_id)
+        ap95 = compute_ap_at_iou(pred_by_video, gt_dict, 0.95, cat_id)
+        map25_scores.append(ap25)
         map50_scores.append(ap50)
         map75_scores.append(ap75)
+        map95_scores.append(ap95)
+        ap_per_category[cat_id] = {
+            'AP@0.25': ap25,
+            'AP@0.5': ap50,
+            'AP@0.75': ap75,
+            'AP@0.95': ap95,
+        }
         cat_name = gt_category_names.get(cat_id, f"ID {cat_id}")
-        print(f"Category '{cat_name}': AP@0.5 = {ap50:.4f}, AP@0.75 = {ap75:.4f}")
+        print(f"Category '{cat_name}': AP@0.25 = {ap25:.4f}, AP@0.5 = {ap50:.4f}, AP@0.75 = {ap75:.4f}, AP@0.95 = {ap95:.4f}")
 
+    map25 = np.mean(map25_scores) if map25_scores else 0.0
     map50 = np.mean(map50_scores) if map50_scores else 0.0
     map75 = np.mean(map75_scores) if map75_scores else 0.0
+    map95 = np.mean(map95_scores) if map95_scores else 0.0
 
     # Fill in video and dataset metrics in csv_rows
     idx = 0
@@ -299,26 +340,159 @@ def main(results_json, val_json, csv_path="mask_metrics.csv"):
         row["video_boundary_Fmeasure"] = video_fmeasures[video_id]
         row["dataset_IoU"] = dataset_iou
         row["dataset_boundary_Fmeasure"] = dataset_fmeasure
+        row["mAP@0.25"] = map25
         row["mAP@0.5"] = map50
         row["mAP@0.75"] = map75
+        row["mAP@0.95"] = map95
+        # Add per-category APs
+        cat_id = row["category_id"]
+        ap_cat = ap_per_category.get(cat_id, {'AP@0.25': None, 'AP@0.5': None, 'AP@0.75': None, 'AP@0.95': None})
+        row["AP@0.25"] = ap_cat['AP@0.25']
+        row["AP@0.5"] = ap_cat['AP@0.5']
+        row["AP@0.75"] = ap_cat['AP@0.75']
+        row["AP@0.95"] = ap_cat['AP@0.95']
+        # Add prediction info
+        pred_info = video_pred_info[video_id]
+        row["predicted_category_id"] = pred_info['predicted_category_id']
+        row["predicted_category_name"] = pred_info['predicted_category_name']
+        row["predicted_score"] = pred_info['predicted_score']
+        row["gt_category_id"] = ','.join(str(x) for x in pred_info['gt_category_ids'])
+        row["gt_category_name"] = ','.join(pred_info['gt_category_names'])
         idx += 1
 
     # Print per-video and dataset metrics
     for video_id in video_ious:
-        print(f"Video {video_id}: Mean IoU = {video_ious[video_id]:.4f}, Mean Boundary F = {video_fmeasures[video_id]:.4f}")
+        pred_info = video_pred_info[video_id]
+        print(f"Video {video_id}: Mean IoU = {video_ious[video_id]:.4f}, Mean Boundary F = {video_fmeasures[video_id]:.4f}, "
+              f"Predicted Cat: {pred_info['predicted_category_id']} ({pred_info['predicted_category_name']}), "
+              f"Score: {pred_info['predicted_score']}, "
+              f"GT Cat(s): {pred_info['gt_category_ids']} ({pred_info['gt_category_names']})")
     print(f"Overall Dataset: Mean IoU = {dataset_iou:.4f}, Mean Boundary F = {dataset_fmeasure:.4f}")
-    print(f"mAP@0.5: {map50:.4f}, mAP@0.75: {map75:.4f}")
+    print(f"mAP@0.25: {map25:.4f}, mAP@0.5: {map50:.4f}, mAP@0.75: {map75:.4f}, mAP@0.95: {map95:.4f}")
 
     # Save CSV
     with open(csv_path, 'w', newline='') as csvfile:
-        fieldnames = ["video_id", "category_id", "file_name", "frame_IoU", "frame_boundary_Fmeasure", "video_IoU", "video_boundary_Fmeasure", "dataset_IoU", "dataset_boundary_Fmeasure", "mAP@0.5", "mAP@0.75"]
+        fieldnames = ["video_id", "category_id", "file_name", "frame_IoU", "frame_boundary_Fmeasure", "video_IoU", "video_boundary_Fmeasure", "dataset_IoU", "dataset_boundary_Fmeasure", "mAP@0.25", "mAP@0.5", "mAP@0.75", "mAP@0.95", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95", "predicted_category_id", "predicted_category_name", "predicted_score", "gt_category_id", "gt_category_name"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for row in csv_rows:
             writer.writerow(row)
 
+    # --- Confusion Matrix Calculation ---
+    # For each GT object, find the best-matching prediction (highest IoU, any class)
+    y_true = []
+    y_pred = []
+    for video_id in video_ids:
+        gt_anns = gt_dict.get(video_id, [])
+        preds = pred_by_video.get(video_id, [])
+        for gt_ann in gt_anns:
+            gt_cat = gt_ann['category_id']
+            gt_segs = gt_ann['segmentations']
+            best_iou = -1
+            best_pred_cat = None
+            for pred in preds:
+                pred_cat = pred['category_id']
+                pred_segs = pred['segmentations']
+                length = min(len(pred_segs), len(gt_segs))
+                ious = []
+                for frame_idx in range(length):
+                    pred_rle = pred_segs[frame_idx]
+                    gt_rle = gt_segs[frame_idx]
+                    mask_shape = (960, 1280)
+                    if pred_rle is None and gt_rle is not None:
+                        pred_mask = np.zeros(mask_shape, dtype=np.uint8)
+                        gt_mask = decode_rle(gt_rle)
+                    elif gt_rle is None and pred_rle is not None:
+                        gt_mask = np.zeros(mask_shape, dtype=np.uint8)
+                        pred_mask = decode_rle(pred_rle)
+                    elif pred_rle is None and gt_rle is None:
+                        pred_mask = np.zeros(mask_shape, dtype=np.uint8)
+                        gt_mask = np.zeros(mask_shape, dtype=np.uint8)
+                    else:
+                        pred_mask = decode_rle(pred_rle)
+                        gt_mask = decode_rle(gt_rle)
+                    iou = compute_iou(pred_mask, gt_mask)
+                    ious.append(iou)
+                mean_iou = np.mean(ious) if ious else 0.0
+                if mean_iou > best_iou:
+                    best_iou = mean_iou
+                    best_pred_cat = pred_cat
+            y_true.append(gt_cat)
+            y_pred.append(best_pred_cat if best_pred_cat is not None else -1)
+    # Confusion matrix
+    labels = sorted(list(gt_category_ids))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[gt_category_names[l] for l in labels])
+    fig, ax = plt.subplots(figsize=(8, 8))
+    disp.plot(ax=ax, cmap='Blues', xticks_rotation=45)
+    plt.title('Classification Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(cm_plot_path)
+    plt.close(fig)
+
+def plot_confusion_matrix_from_csv(csv_path, output_path="confusion_matrix_from_csv.png"):
+    """
+    Plots a confusion matrix using only the first frame of each video from the mask_metrics.csv file.
+    Compares predicted_category_name to gt_category_name.
+    """
+    # Read the CSV
+    df = pd.read_csv(csv_path)
+
+    # Get the first frame for each video (assuming sorted by video_id and frame order)
+    first_frames = df.groupby('video_id').first().reset_index()
+    print(first_frames.head())
+    # Extract predicted and ground truth category names
+    y_true = first_frames['gt_category_name']
+    y_pred = first_frames['predicted_category_name']
+
+    # Get sorted list of all unique categories
+    all_categories = sorted(set(y_true) | set(y_pred))
+
+    # Compute confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=all_categories)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=all_categories)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    disp.plot(ax=ax, cmap='Blues', xticks_rotation=45)
+    plt.title('Confusion Matrix (First Frame per Video)')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close(fig)
+
+def plot_ap_per_category_from_csv(csv_path, output_path="AP_per_category.png"):
+    """
+    Reads mask_metrics.csv and plots the AP@0.25, AP@0.5, AP@0.75, AP@0.95 for each category in the dataset (grouped by gt_category_name).
+    The x-axis is the category, the y-axis is AP, and each AP level is a different colored point.
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    df = pd.read_csv(csv_path)
+    ap_columns = ["AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95"]
+    grouped = df.groupby('gt_category_name')[ap_columns].first().reset_index()
+
+    plt.figure(figsize=(10, 6))
+    markers = ['o', 's', '^', 'D']
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    for i, ap_col in enumerate(ap_columns):
+        plt.scatter(grouped['gt_category_name'], grouped[ap_col], label=ap_col, marker=markers[i], color=colors[i], s=80)
+    plt.xlabel('Category')
+    plt.ylabel('Average Precision (AP)')
+    plt.title('AP per Category at Different IoU Thresholds')
+    plt.xticks(rotation=45, ha='right')
+    plt.ylim(0, 1)
+    plt.legend(title='IoU Threshold')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
 if __name__ == "__main__":
-    main(results_json='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids/inference/results.json', 
-         val_json='/home/simone/shared-data/fishway_ytvis/val_trimmed.json', 
-         csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids/inference/mask_metrics.csv')
+    main(results_json='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/results.json', 
+         val_json='/data/fishway_ytvis/val_trimmed.json', 
+         csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/mask_metrics.csv',
+         cm_plot_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/confusion_matrix.png')
     
+    # plot_confusion_matrix_from_csv(csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/iter_8199/inference/mask_metrics.csv',
+    #                                output_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/iter_8199/inference/confusion_matrix.png')
+
+    plot_ap_per_category_from_csv(csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/mask_metrics.csv', 
+                                   output_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/AP_per_category.png')
