@@ -18,6 +18,7 @@ import copy
 import itertools
 import logging
 import os
+import gc
 
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
@@ -310,13 +311,13 @@ def setup(args):
         "ytvis_fishway_train",
         {},
         "/data/fishway_ytvis/train.json",
-        "/data/fishway_ytvis/train"
+        "/data/fishway_ytvis/all_videos_mask"
     )
     register_ytvis_instances(
         "ytvis_fishway_val",
         {},
         "/data/fishway_ytvis/val_trimmed.json",
-        "/data/fishway_ytvis/val"
+        "/data/fishway_ytvis/all_videos_mask"
     )
 
     cfg.freeze()
@@ -346,10 +347,16 @@ def main(args):
     trainer.resume_or_load(resume=args.resume)
 
     # # Add periodic validation evaluation
-    # eval_period = 800  # or any value you like
-    # trainer.register_hooks([
-    #     hooks.EvalHook(eval_period, lambda: Trainer.test(cfg, trainer.model))
-    # ])
+    eval_period = 356  # or any value you like
+    def eval_and_clear():
+        results = Trainer.test(cfg, trainer.model)
+        torch.cuda.empty_cache()
+        gc.collect()
+        return results
+
+    trainer.register_hooks([
+        hooks.EvalHook(eval_period, eval_and_clear)
+    ])
 
     return trainer.train()
 
