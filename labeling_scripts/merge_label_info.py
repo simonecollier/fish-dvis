@@ -3,7 +3,7 @@ import csv
 
 VAL_JSON_PATH = '/data/fishway_ytvis/val.json'
 FISHWAY_METADATA_PATH = 'home/simone/fish-dvis/data_scripts/fishway_metadata.csv'
-RESULTS_JSON_PATH = 'fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/inference/results.json'
+RESULTS_JSON_PATH = '/store/simone/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/inference/results.json'
 OUTPUT_JSON_PATH = '/data/labeled/simone/fishway_ytvis.json'
 # --- Load val.json ---
 with open(VAL_JSON_PATH, 'r') as f:
@@ -41,7 +41,7 @@ for vid in val_data['videos']:
     videoid_to_folder[vid['id']] = folder
 
 # --- Load results.json ---
-with open('fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids/inference/results.json', 'r') as f:
+with open('/store/simone/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids/inference/results.json', 'r') as f:
     results = json.load(f)
 
 # --- Build annotations ---

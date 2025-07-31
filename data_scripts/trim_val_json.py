@@ -1,7 +1,7 @@
 import json
 
-VAL_JSON_PATH = "/data/fishway_ytvis/val_all.json"  # Change this if your file is elsewhere
-OUTPUT_JSON_PATH = "/data/fishway_ytvis/val.json"  # Output file
+VAL_JSON_PATH = "/data/fishway_ytvis/val.json"  # Change this if your file is elsewhere
+OUTPUT_JSON_PATH = "/data/fishway_ytvis/val_trimmed.json"  # Output file
 
 MAX_FRAMES = 30
 
