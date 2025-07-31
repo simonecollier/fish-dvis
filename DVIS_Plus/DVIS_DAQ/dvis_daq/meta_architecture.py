@@ -342,8 +342,11 @@ class DVIS_DAQ_online(MinVIS):
 
         return losses
 
-    def inference(self, batched_inputs, window_size=5):
+    def inference(self, batched_inputs, window_size=None):
         # for running demo on very long videos
+        if window_size is None:
+            window_size = self.window_size  # Use the config value
+        
         if 'keep' in batched_inputs[0].keys():
             self.keep = batched_inputs[0]['keep']
         else:
@@ -488,7 +491,13 @@ class DVIS_DAQ_online(MinVIS):
     def run_window_inference(self, images_tensor, window_size=30, long_video_start_fidx=-1):
         video_start_idx = long_video_start_fidx if long_video_start_fidx >= 0 else 0
 
-        window_size = 5
+        # Use the window_size parameter instead of hardcoding it
+        # window_size = 5  # REMOVED: This was overriding the config!
+        
+        # Debug print to verify window size is being used
+        if hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+            print(f"[DEBUG] run_window_inference called with window_size={window_size}, num_frames={len(images_tensor)}")
+        
         num_frames = len(images_tensor)
         to_store = "cpu"
         iters = len(images_tensor) // window_size
@@ -1102,8 +1111,17 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
         self.sem_seg_head.eval()
         self.tracker.eval()
 
+        # Debug print to verify training window size
+        if self.training and hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+            print(f"[TRAINING DEBUG] Input images tensor shape: {images.tensor.shape}")
+            print(f"[TRAINING DEBUG] Expected SAMPLING_FRAME_NUM: {self.num_frames}")
+            print(f"[TRAINING DEBUG] Actual frames in batch: {images.tensor.shape[0] if len(images.tensor.shape) > 3 else images.tensor.shape[1]}")
+            print(f"[TRAINING DEBUG] Using window_size: {self.num_frames} (should match SAMPLING_FRAME_NUM)")
+
         with torch.no_grad():
-            common_out = self.common_inference(images.tensor, window_size=5, to_store="cuda")
+            # Use num_frames (SAMPLING_FRAME_NUM) for training, not window_size (evaluation setting)
+            training_window_size = self.num_frames if self.training else self.window_size
+            common_out = self.common_inference(images.tensor, window_size=training_window_size, to_store="cuda")
         frame_embeds = common_out["frame_embeds"].clone().detach()
         mask_features = common_out["mask_features"].clone().detach()
         B, C, T, Q = frame_embeds.shape
@@ -1136,16 +1154,26 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
                 losses.pop(k)
         return losses
 
-    def segmenter_windows_inference(self, images_tensor, window_size=5, long_video_start_fidx=-1, to_store="cpu"):
+    def segmenter_windows_inference(self, images_tensor, window_size=None, long_video_start_fidx=-1, to_store="cpu"):
+        if window_size is None:
+            window_size = self.window_size
         image_outputs = {}
         iters = len(images_tensor) // window_size
         if len(images_tensor) % window_size != 0:
             iters += 1
 
+        # Debug print to verify window processing
+        if self.training and hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+            print(f"[TRAINING DEBUG] segmenter_windows_inference: total frames={len(images_tensor)}, window_size={window_size}, iters={iters}")
+
         outs_list = []
         for i in range(iters):
             start_idx = i * window_size
             end_idx = (i + 1) * window_size
+
+            # Debug print to show frame processing
+            if self.training and hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+                print(f"[TRAINING DEBUG] Processing window {i+1}/{iters}: frames {start_idx}-{end_idx}")
 
             features = self.backbone(images_tensor[start_idx:end_idx])
             out = self.sem_seg_head(features)
@@ -1168,6 +1196,11 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
 
     def common_inference(self, images_tensor, window_size=30, long_video_start_fidx=-1, to_store="cpu"):
         video_start_idx = long_video_start_fidx if long_video_start_fidx >= 0 else 0
+
+        # Debug print to verify window size being used
+        if self.training and hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+            print(f"[TRAINING DEBUG] common_inference called with window_size={window_size}")
+            print(f"[TRAINING DEBUG] Total frames in tensor: {len(images_tensor)}")
 
         with torch.no_grad():
             image_outputs = self.segmenter_windows_inference(images_tensor, window_size=window_size, to_store=to_store)
@@ -1195,15 +1228,24 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
 
             num_frames = len(images_tensor)
             iters = len(images_tensor) // window_size
-            infer_func = self.tracker.forward_offline_mode if self.training else self.tracker.inference
+            # Use forward_offline_mode for both training and evaluation to save memory
+            infer_func = self.tracker.forward_offline_mode
             if len(images_tensor) % window_size != 0:
                 iters += 1
             for i in range(iters):
                 start_idx = i * window_size
                 end_idx = (i + 1) * window_size if (i + 1) * window_size < num_frames else num_frames
 
+                if hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+                    print(f"[DEBUG] Processing window {i+1}/{iters}: frames {start_idx}-{end_idx}")
+                    print(f"[DEBUG] GPU memory before tracker: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+
                 frame_embeds_i = frame_embeds[:, :, start_idx:end_idx, :]
                 mask_features_i = mask_features[:, start_idx:end_idx, ...]
+
+                if hasattr(self, 'cfg') and hasattr(self.cfg, 'DEBUG') and self.cfg.DEBUG:
+                    print(f"[DEBUG] frame_embeds_i shape: {frame_embeds_i.shape}")
+                    print(f"[DEBUG] mask_features_i shape: {mask_features_i.shape}")
                 frames_info_i = {
                     "valid": new_valid_masks[start_idx:end_idx], "pred_logits": new_pred_logits[start_idx:end_idx],
                     "pred_masks": new_pred_masks[start_idx:end_idx],
