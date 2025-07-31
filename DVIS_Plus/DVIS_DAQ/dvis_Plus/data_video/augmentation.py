@@ -430,7 +430,7 @@ def build_augmentation(cfg, is_train):
 
                 aug_list.append(
                     # NOTE using RandomFlip modified for the support of flip maintenance
-                    RandomFlipClip(
+                    RandomFlip(
                         horizontal=(cfg.INPUT.RANDOM_FLIP == "horizontal") or (cfg.INPUT.RANDOM_FLIP == "flip_by_clip"),
                         vertical=cfg.INPUT.RANDOM_FLIP == "vertical",
                         clip_frame_cnt=flip_clip_frame_cnt,
@@ -522,7 +522,7 @@ def build_pseudo_augmentation(cfg, is_train):
 
                 aug_list.append(
                     # NOTE using RandomFlip modified for the support of flip maintenance
-                    RandomFlipClip(
+                    RandomFlip(
                         horizontal=(cfg.INPUT.RANDOM_FLIP == "horizontal") or (cfg.INPUT.RANDOM_FLIP == "flip_by_clip"),
                         vertical=cfg.INPUT.RANDOM_FLIP == "vertical",
                         clip_frame_cnt=clip_frame_cnt,
