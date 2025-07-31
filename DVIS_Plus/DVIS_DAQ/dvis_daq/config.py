@@ -15,6 +15,7 @@ def add_daq_config(cfg):
     cfg.MODEL.VIDEO_HEAD.SKIP_PARAMS = []
     cfg.INPUT.USING_FRAME_NUM = None
     cfg.INPUT.STEPS = None
+    cfg.INPUT.SAMPLING_FRAME_STRIDE = 1  # Default stride for frame sampling
     cfg.MODEL.VIDEO_HEAD.CL_ON_SLOTS = False
 
     # FOR INFERENCE

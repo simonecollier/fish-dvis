@@ -156,6 +156,7 @@ class YTVISDatasetMapper:
         num_classes: int = 40,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        sampling_frame_stride: int = 1,
     ):
         """
         NOTE: this interface is experimental.
@@ -177,6 +178,7 @@ class YTVISDatasetMapper:
         self.num_classes            = num_classes
         self.sampling_frame_ratio = 1.0
         self.reverse_agu = reverse_agu
+        self.sampling_frame_stride   = sampling_frame_stride
 
         if not is_tgt:
             self.src_metadata = MetadataCatalog.get(src_dataset_name)
@@ -214,6 +216,7 @@ class YTVISDatasetMapper:
         sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
         sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
         reverse_agu = cfg.INPUT.REVERSE_AGU
+        sampling_frame_stride = cfg.INPUT.SAMPLING_FRAME_STRIDE
 
         ret = {
             "is_train": is_train,
@@ -227,6 +230,7 @@ class YTVISDatasetMapper:
             "reverse_agu": reverse_agu,
             "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
             "tgt_dataset_name": cfg.DATASETS.TRAIN[-1],
+            "sampling_frame_stride": sampling_frame_stride,
         }
 
         return ret
@@ -273,19 +277,17 @@ class YTVISDatasetMapper:
             start_idx = max(0, ref_frame-self.sampling_frame_range)
             end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
 
-            if end_idx - start_idx >= self.sampling_frame_num:
-                replace = False
-            else:
-                replace = True
-
+            candidate_indices = list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))
+            # Apply stride
+            candidate_indices = candidate_indices[::self.sampling_frame_stride]
             selected_idx = np.random.choice(
-                np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+                np.array(candidate_indices),
                 self.sampling_frame_num - 1,
-                replace=replace
             )
             selected_idx = selected_idx.tolist() + [ref_frame]
             selected_idx = sorted(selected_idx)
-
+            if self.sampling_frame_shuffle:
+                random.shuffle(selected_idx)
         return selected_idx
 
     def __call__(self, dataset_dict):
@@ -403,6 +405,7 @@ class CocoClipDatasetMapper:
         reverse_agu: bool = False,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        sampling_frame_stride: int = 1,
     ):
         """
         NOTE: this interface is experimental.
@@ -421,6 +424,7 @@ class CocoClipDatasetMapper:
         self.sampling_frame_shuffle = sampling_frame_shuffle
         self.reverse_agu            = reverse_agu
         self.sampling_frame_ratio   = 1.0
+        self.sampling_frame_stride   = sampling_frame_stride
 
         if not is_tgt:
             self.src_metadata = MetadataCatalog.get(src_dataset_name)
@@ -452,6 +456,7 @@ class CocoClipDatasetMapper:
         sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
         sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
         reverse_agu = cfg.INPUT.REVERSE_AGU
+        sampling_frame_stride = cfg.INPUT.SAMPLING_FRAME_STRIDE
 
         ret = {
             "is_train": is_train,
@@ -463,6 +468,7 @@ class CocoClipDatasetMapper:
             "sampling_frame_shuffle": sampling_frame_shuffle,
             "reverse_agu": reverse_agu,
             "tgt_dataset_name": cfg.DATASETS.TRAIN[-1],
+            "sampling_frame_stride": sampling_frame_stride,
         }
 
         return ret
@@ -509,12 +515,16 @@ class CocoClipDatasetMapper:
             start_idx = max(0, ref_frame - self.sampling_frame_range)
             end_idx = min(video_length, ref_frame + self.sampling_frame_range + 1)
 
-            if end_idx - start_idx >= self.sampling_frame_num:
+            candidate_indices = list(range(start_idx, ref_frame)) + list(range(ref_frame + 1, end_idx))
+            # Apply stride
+            candidate_indices = candidate_indices[::self.sampling_frame_stride]
+            
+            if len(candidate_indices) >= self.sampling_frame_num - 1:
                 replace = False
             else:
                 replace = True
             selected_idx = np.random.choice(
-                np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame + 1, end_idx))),
+                np.array(candidate_indices),
                 self.sampling_frame_num - 1,
                 replace=replace
             )

@@ -21,6 +21,7 @@ class OpenVocabularySemanticDatasetVideoMapper(SemanticDatasetVideoMapper):
             # ids_to_continue_dic,
             sampling_frame_num: int = 2,
             sampling_frame_range: int = 5,
+            sampling_frame_stride: int = 1,
             reverse_agu: bool = False,
             src_dataset_name: str = "",  # not used
             tgt_dataset_name: str = "",  # not used
@@ -51,6 +52,7 @@ class OpenVocabularySemanticDatasetVideoMapper(SemanticDatasetVideoMapper):
         self.sampling_frame_num = sampling_frame_num
         self.sampling_frame_range = sampling_frame_range
         self.sampling_frame_ratio = 1.0
+        self.sampling_frame_stride = sampling_frame_stride
         self.reverse_agu = reverse_agu
 
         logger = logging.getLogger(__name__)
@@ -87,6 +89,7 @@ class OpenVocabularySemanticDatasetVideoMapper(SemanticDatasetVideoMapper):
         #######
         sampling_frame_num = cfg.INPUT.SAMPLING_FRAME_NUM
         sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
+        sampling_frame_stride = cfg.INPUT.SAMPLING_FRAME_STRIDE
         reverse_agu = cfg.INPUT.REVERSE_AGU
 
         ret = {
@@ -95,6 +98,7 @@ class OpenVocabularySemanticDatasetVideoMapper(SemanticDatasetVideoMapper):
             "image_format": cfg.INPUT.FORMAT,
             "sampling_frame_num": sampling_frame_num,
             "sampling_frame_range": sampling_frame_range,
+            "sampling_frame_stride": sampling_frame_stride,
             "reverse_agu": reverse_agu,
         }
         return ret

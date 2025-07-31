@@ -128,6 +128,7 @@ class YTVISDatasetMapper:
         sampling_frame_num: int = 2,
         sampling_frame_range: int = 5,
         sampling_frame_shuffle: bool = False,
+        sampling_frame_stride: int = 1,
         num_classes: int = 40,
     ):
         """
@@ -146,6 +147,7 @@ class YTVISDatasetMapper:
         self.sampling_frame_num     = sampling_frame_num
         self.sampling_frame_range   = sampling_frame_range
         self.sampling_frame_shuffle = sampling_frame_shuffle
+        self.sampling_frame_stride   = sampling_frame_stride
         self.num_classes            = num_classes
         # fmt: on
         logger = logging.getLogger(__name__)
@@ -159,6 +161,7 @@ class YTVISDatasetMapper:
         sampling_frame_num = cfg.INPUT.SAMPLING_FRAME_NUM
         sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
         sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
+        sampling_frame_stride = cfg.INPUT.SAMPLING_FRAME_STRIDE
 
         ret = {
             "is_train": is_train,
@@ -168,6 +171,7 @@ class YTVISDatasetMapper:
             "sampling_frame_num": sampling_frame_num,
             "sampling_frame_range": sampling_frame_range,
             "sampling_frame_shuffle": sampling_frame_shuffle,
+            "sampling_frame_stride": sampling_frame_stride,
             "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
         }
 
@@ -191,8 +195,11 @@ class YTVISDatasetMapper:
             start_idx = max(0, ref_frame-self.sampling_frame_range)
             end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
 
+            candidate_indices = list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))
+            # Apply stride
+            candidate_indices = candidate_indices[::self.sampling_frame_stride]
             selected_idx = np.random.choice(
-                np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+                np.array(candidate_indices),
                 self.sampling_frame_num - 1,
             )
             selected_idx = selected_idx.tolist() + [ref_frame]
@@ -200,7 +207,8 @@ class YTVISDatasetMapper:
             if self.sampling_frame_shuffle:
                 random.shuffle(selected_idx)
         else:
-            selected_idx = range(video_length)
+            # For inference, apply stride to all frames
+            selected_idx = list(range(video_length))[::self.sampling_frame_stride]
 
         video_annos = dataset_dict.pop("annotations", None)
         file_names = dataset_dict.pop("file_names", None)

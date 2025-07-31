@@ -43,6 +43,7 @@ class OpenVocabularyYTVISDatasetMapper(YTVISDatasetMapper):
         num_classes: int = 40,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        sampling_frame_stride: int = 1,
     ):
         """
         NOTE: this interface is experimental.
@@ -65,6 +66,7 @@ class OpenVocabularyYTVISDatasetMapper(YTVISDatasetMapper):
         self.sampling_frame_ratio = 1.0
         self.reverse_agu = reverse_agu
         self.name = src_dataset_name
+        self.sampling_frame_stride   = sampling_frame_stride
 
         # fmt: on
         logger = logging.getLogger(__name__)
@@ -96,6 +98,7 @@ class OpenVocabularyCocoClipDatasetMapper(CocoClipDatasetMapper):
         reverse_agu: bool = False,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        sampling_frame_stride: int = 1,
     ):
         """
         NOTE: this interface is experimental.
@@ -115,6 +118,7 @@ class OpenVocabularyCocoClipDatasetMapper(CocoClipDatasetMapper):
         self.reverse_agu            = reverse_agu
         self.sampling_frame_ratio   = 1.0
         self.name = src_dataset_name
+        self.sampling_frame_stride   = sampling_frame_stride
 
         # fmt: on
         logger = logging.getLogger(__name__)
