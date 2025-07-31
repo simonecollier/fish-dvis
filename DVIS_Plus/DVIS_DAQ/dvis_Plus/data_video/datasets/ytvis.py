@@ -406,7 +406,7 @@ if __name__ == "__main__":
     meta = MetadataCatalog.get("ytvis_fishway_train")
 
     json_file = "/data/fishway_ytvis/train.json"
-    image_root = "/data/fishway_ytvis/train"
+    image_root = "/data/fishway_ytvis/all_videos"
     dicts = load_ytvis_json(json_file, image_root, dataset_name="ytvis_fishway_train")
 
     # import pprint
