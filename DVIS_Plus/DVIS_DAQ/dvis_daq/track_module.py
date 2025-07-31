@@ -505,8 +505,16 @@ class VideoInstanceCutter(nn.Module):
                 frame_queries_pos, _ = self.get_mask_pos_embed(frames_info["pred_masks"][i][0][None],
                                                                ori_mask_features[:, i, ...])
 
+                # Limit track queries to match the segmentation head capacity
+                max_track_queries = 200 - new_ins_embeds.shape[0]  # Leave room for new instances
+                if self.track_queries.shape[0] > max_track_queries:
+                    self.track_queries = self.track_queries[:max_track_queries]
+                    self.track_embeds = self.track_embeds[:max_track_queries]
+                
                 trc_det_queries = torch.cat([self.track_queries, new_ins_embeds])
-                trc_det_queries_pos = torch.cat([self.track_embeds, frame_queries_pos])
+                # Use all position embeddings for memory, but only the first N for new queries
+                new_ins_pos = frame_queries_pos[:new_ins_embeds.shape[0]]
+                trc_det_queries_pos = torch.cat([self.track_embeds, new_ins_pos])
 
                 for j in range(self.num_layers):
                     trc_det_queries = self.transformer_cross_attention_layers[j](
