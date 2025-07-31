@@ -138,10 +138,33 @@ def compute_ap_at_iou(pred_by_video, gt_dict, iou_threshold, category_id):
         
     return ap
 
-def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="confusion_matrix.png"):
+def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="confusion_matrix.png", confidence_threshold=0.01, fast_mode=False):
     preds = load_json(results_json)
     gts = load_json(val_json)
 
+    # Filter out low confidence predictions
+    filtered_preds = [pred for pred in preds if pred.get('score', 0.0) >= confidence_threshold]
+    print(f"Original predictions: {len(preds)}")
+    print(f"Filtered predictions (confidence >= {confidence_threshold}): {len(filtered_preds)}")
+    
+    if len(filtered_preds) == 0:
+        print("WARNING: No predictions meet the confidence threshold!")
+        print("This will result in all metrics being 0.")
+        # Create empty CSV with headers
+        fieldnames = ["video_id", "category_id", "file_name", "frame_IoU", "frame_boundary_Fmeasure", 
+                     "video_IoU", "video_boundary_Fmeasure", "dataset_IoU", "dataset_boundary_Fmeasure", 
+                     "mAP@0.1", "mAP@0.25", "mAP@0.5", "mAP@0.75", "mAP@0.95", 
+                     "AP@0.1", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95", 
+                     "predicted_category_id", "predicted_category_name", "predicted_score", 
+                     "gt_category_id", "gt_category_name"]
+        with open(csv_path, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+        return
+
+    if fast_mode:
+        print("FAST MODE: Skipping boundary F-measure and using fewer AP thresholds")
+    
     gt_category_ids = {cat['id'] for cat in gts['categories']}
     gt_category_names = {cat['id']: cat['name'] for cat in gts['categories']}
 
@@ -154,7 +177,7 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
 
     # Group predictions by video_id
     pred_by_video = defaultdict(list)
-    for pred in preds:
+    for pred in filtered_preds:  # Use filtered predictions
         if pred.get('category_id') in gt_category_ids:
             vid = pred['video_id']
             pred_by_video[vid].append(pred)
@@ -234,7 +257,10 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
                             pred_mask = decode_rle(pred_rle)
                             gt_mask = decode_rle(gt_rle)
                         iou = compute_iou(pred_mask, gt_mask)
-                        fmeasure = boundary_f_measure(pred_mask, gt_mask)
+                        if not fast_mode:
+                            fmeasure = boundary_f_measure(pred_mask, gt_mask)
+                        else:
+                            fmeasure = 0.0  # Skip expensive boundary calculation
                         frame_ious.append(iou)
                         frame_fmeasures.append(fmeasure)
                     mean_iou = np.mean(frame_ious) if frame_ious else 0.0
@@ -276,7 +302,10 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
                         pred_mask = decode_rle(pred_rle)
                         gt_mask = decode_rle(gt_rle)
                     iou = compute_iou(pred_mask, gt_mask)
-                    fmeasure = boundary_f_measure(pred_mask, gt_mask)
+                    if not fast_mode:
+                        fmeasure = boundary_f_measure(pred_mask, gt_mask)
+                    else:
+                        fmeasure = 0.0  # Skip expensive boundary calculation
                     frame_ious.append(iou)
                     frame_fmeasures.append(fmeasure)
                     all_frame_ious.append(iou)
@@ -303,34 +332,55 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
     dataset_iou = np.mean(list(video_ious.values())) if video_ious else 0.0
     dataset_fmeasure = np.mean(list(video_fmeasures.values())) if video_fmeasures else 0.0
 
-    # Compute mAP@0.5, mAP@0.75, mAP@0.25, and mAP@0.95
-    map25_scores = []
-    map50_scores = []
-    map75_scores = []
-    map95_scores = []
-    ap_per_category = {}
-    for cat_id in gt_category_ids:
-        ap25 = compute_ap_at_iou(pred_by_video, gt_dict, 0.25, cat_id)
-        ap50 = compute_ap_at_iou(pred_by_video, gt_dict, 0.5, cat_id)
-        ap75 = compute_ap_at_iou(pred_by_video, gt_dict, 0.75, cat_id)
-        ap95 = compute_ap_at_iou(pred_by_video, gt_dict, 0.95, cat_id)
-        map25_scores.append(ap25)
-        map50_scores.append(ap50)
-        map75_scores.append(ap75)
-        map95_scores.append(ap95)
-        ap_per_category[cat_id] = {
-            'AP@0.25': ap25,
-            'AP@0.5': ap50,
-            'AP@0.75': ap75,
-            'AP@0.95': ap95,
-        }
-        cat_name = gt_category_names.get(cat_id, f"ID {cat_id}")
-        print(f"Category '{cat_name}': AP@0.25 = {ap25:.4f}, AP@0.5 = {ap50:.4f}, AP@0.75 = {ap75:.4f}, AP@0.95 = {ap95:.4f}")
-
-    map25 = np.mean(map25_scores) if map25_scores else 0.0
-    map50 = np.mean(map50_scores) if map50_scores else 0.0
-    map75 = np.mean(map75_scores) if map75_scores else 0.0
-    map95 = np.mean(map95_scores) if map95_scores else 0.0
+    # Compute mAP - use fewer thresholds in fast mode
+    if fast_mode:
+        iou_thresholds = [0.1, 0.5]  # Only compute AP@0.1 and AP@0.5
+        map_scores = {0.1: [], 0.5: []}
+        ap_per_category = {}
+        for cat_id in gt_category_ids:
+            ap10 = compute_ap_at_iou(pred_by_video, gt_dict, 0.1, cat_id)
+            ap50 = compute_ap_at_iou(pred_by_video, gt_dict, 0.5, cat_id)
+            map_scores[0.1].append(ap10)
+            map_scores[0.5].append(ap50)
+            ap_per_category[cat_id] = {
+                'AP@0.1': ap10,
+                'AP@0.5': ap50,
+            }
+        map10 = np.mean(map_scores[0.1]) if map_scores[0.1] else 0.0
+        map50 = np.mean(map_scores[0.5]) if map_scores[0.5] else 0.0
+        # Set other thresholds to 0 in fast mode
+        map25 = map75 = map95 = 0.0
+    else:
+        # Compute mAP@0.1, mAP@0.25, mAP@0.5, mAP@0.75, and mAP@0.95
+        map10_scores = []
+        map25_scores = []
+        map50_scores = []
+        map75_scores = []
+        map95_scores = []
+        ap_per_category = {}
+        for cat_id in gt_category_ids:
+            ap10 = compute_ap_at_iou(pred_by_video, gt_dict, 0.1, cat_id)
+            ap25 = compute_ap_at_iou(pred_by_video, gt_dict, 0.25, cat_id)
+            ap50 = compute_ap_at_iou(pred_by_video, gt_dict, 0.5, cat_id)
+            ap75 = compute_ap_at_iou(pred_by_video, gt_dict, 0.75, cat_id)
+            ap95 = compute_ap_at_iou(pred_by_video, gt_dict, 0.95, cat_id)
+            map10_scores.append(ap10)
+            map25_scores.append(ap25)
+            map50_scores.append(ap50)
+            map75_scores.append(ap75)
+            map95_scores.append(ap95)
+            ap_per_category[cat_id] = {
+                'AP@0.1': ap10,
+                'AP@0.25': ap25,
+                'AP@0.5': ap50,
+                'AP@0.75': ap75,
+                'AP@0.95': ap95,
+            }
+        map10 = np.mean(map10_scores) if map10_scores else 0.0
+        map25 = np.mean(map25_scores) if map25_scores else 0.0
+        map50 = np.mean(map50_scores) if map50_scores else 0.0
+        map75 = np.mean(map75_scores) if map75_scores else 0.0
+        map95 = np.mean(map95_scores) if map95_scores else 0.0
 
     # Fill in video and dataset metrics in csv_rows
     idx = 0
@@ -340,17 +390,27 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
         row["video_boundary_Fmeasure"] = video_fmeasures[video_id]
         row["dataset_IoU"] = dataset_iou
         row["dataset_boundary_Fmeasure"] = dataset_fmeasure
+        row["mAP@0.1"] = map10
         row["mAP@0.25"] = map25
         row["mAP@0.5"] = map50
         row["mAP@0.75"] = map75
         row["mAP@0.95"] = map95
         # Add per-category APs
         cat_id = row["category_id"]
-        ap_cat = ap_per_category.get(cat_id, {'AP@0.25': None, 'AP@0.5': None, 'AP@0.75': None, 'AP@0.95': None})
-        row["AP@0.25"] = ap_cat['AP@0.25']
-        row["AP@0.5"] = ap_cat['AP@0.5']
-        row["AP@0.75"] = ap_cat['AP@0.75']
-        row["AP@0.95"] = ap_cat['AP@0.95']
+        if fast_mode:
+            ap_cat = ap_per_category.get(cat_id, {'AP@0.1': None, 'AP@0.5': None})
+            row["AP@0.1"] = ap_cat['AP@0.1']
+            row["AP@0.25"] = 0.0  # Not computed in fast mode
+            row["AP@0.5"] = ap_cat['AP@0.5']
+            row["AP@0.75"] = 0.0  # Not computed in fast mode
+            row["AP@0.95"] = 0.0  # Not computed in fast mode
+        else:
+            ap_cat = ap_per_category.get(cat_id, {'AP@0.1': None, 'AP@0.25': None, 'AP@0.5': None, 'AP@0.75': None, 'AP@0.95': None})
+            row["AP@0.1"] = ap_cat['AP@0.1']
+            row["AP@0.25"] = ap_cat['AP@0.25']
+            row["AP@0.5"] = ap_cat['AP@0.5']
+            row["AP@0.75"] = ap_cat['AP@0.75']
+            row["AP@0.95"] = ap_cat['AP@0.95']
         # Add prediction info
         pred_info = video_pred_info[video_id]
         row["predicted_category_id"] = pred_info['predicted_category_id']
@@ -368,11 +428,11 @@ def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="conf
               f"Score: {pred_info['predicted_score']}, "
               f"GT Cat(s): {pred_info['gt_category_ids']} ({pred_info['gt_category_names']})")
     print(f"Overall Dataset: Mean IoU = {dataset_iou:.4f}, Mean Boundary F = {dataset_fmeasure:.4f}")
-    print(f"mAP@0.25: {map25:.4f}, mAP@0.5: {map50:.4f}, mAP@0.75: {map75:.4f}, mAP@0.95: {map95:.4f}")
+    print(f"mAP@0.1: {map10:.4f}, mAP@0.25: {map25:.4f}, mAP@0.5: {map50:.4f}, mAP@0.75: {map75:.4f}, mAP@0.95: {map95:.4f}")
 
     # Save CSV
     with open(csv_path, 'w', newline='') as csvfile:
-        fieldnames = ["video_id", "category_id", "file_name", "frame_IoU", "frame_boundary_Fmeasure", "video_IoU", "video_boundary_Fmeasure", "dataset_IoU", "dataset_boundary_Fmeasure", "mAP@0.25", "mAP@0.5", "mAP@0.75", "mAP@0.95", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95", "predicted_category_id", "predicted_category_name", "predicted_score", "gt_category_id", "gt_category_name"]
+        fieldnames = ["video_id", "category_id", "file_name", "frame_IoU", "frame_boundary_Fmeasure", "video_IoU", "video_boundary_Fmeasure", "dataset_IoU", "dataset_boundary_Fmeasure", "mAP@0.1", "mAP@0.25", "mAP@0.5", "mAP@0.75", "mAP@0.95", "AP@0.1", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95", "predicted_category_id", "predicted_category_name", "predicted_score", "gt_category_id", "gt_category_name"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for row in csv_rows:
@@ -460,19 +520,19 @@ def plot_confusion_matrix_from_csv(csv_path, output_path="confusion_matrix_from_
 
 def plot_ap_per_category_from_csv(csv_path, output_path="AP_per_category.png"):
     """
-    Reads mask_metrics.csv and plots the AP@0.25, AP@0.5, AP@0.75, AP@0.95 for each category in the dataset (grouped by gt_category_name).
+    Reads mask_metrics.csv and plots the AP@0.1, AP@0.25, AP@0.5, AP@0.75, AP@0.95 for each category in the dataset (grouped by gt_category_name).
     The x-axis is the category, the y-axis is AP, and each AP level is a different colored point.
     """
     import pandas as pd
     import matplotlib.pyplot as plt
 
     df = pd.read_csv(csv_path)
-    ap_columns = ["AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95"]
+    ap_columns = ["AP@0.1", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95"]
     grouped = df.groupby('gt_category_name')[ap_columns].first().reset_index()
 
-    plt.figure(figsize=(10, 6))
-    markers = ['o', 's', '^', 'D']
-    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    plt.figure(figsize=(12, 6))
+    markers = ['o', 's', '^', 'D', 'v']
+    colors = ['tab:purple', 'tab:blue', 'tab:orange', 'tab:green', 'tab:red']
     for i, ap_col in enumerate(ap_columns):
         plt.scatter(grouped['gt_category_name'], grouped[ap_col], label=ap_col, marker=markers[i], color=colors[i], s=80)
     plt.xlabel('Category')
@@ -486,13 +546,34 @@ def plot_ap_per_category_from_csv(csv_path, output_path="AP_per_category.png"):
     plt.close()
 
 if __name__ == "__main__":
-    main(results_json='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/results.json', 
-         val_json='/data/fishway_ytvis/val_trimmed.json', 
-         csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/mask_metrics.csv',
-         cm_plot_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/confusion_matrix.png')
+    import argparse
     
-    # plot_confusion_matrix_from_csv(csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/iter_8199/inference/mask_metrics.csv',
-    #                                output_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k/iter_8199/inference/confusion_matrix.png')
-
-    plot_ap_per_category_from_csv(csv_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/mask_metrics.csv', 
-                                   output_path='/home/simone/fish-dvis/dvis-model-outputs/trained_models/maskedvids_8.9k_lr0.0001_stepped/inference/AP_per_category.png')
+    parser = argparse.ArgumentParser(description='Run mask metrics analysis')
+    parser.add_argument('--results-json', type=str, required=True,
+                       help='Path to results.json file')
+    parser.add_argument('--val-json', type=str, default='/data/fishway_ytvis/val.json',
+                       help='Path to validation JSON file')
+    parser.add_argument('--csv-path', type=str, default='mask_metrics.csv',
+                       help='Path to save mask metrics CSV')
+    parser.add_argument('--cm-plot-path', type=str, default='confusion_matrix.png',
+                       help='Path to save confusion matrix plot')
+    parser.add_argument('--ap-plot-path', type=str, default='AP_per_category.png',
+                       help='Path to save AP per category plot')
+    parser.add_argument('--confidence-threshold', type=float, default=0.01,
+                       help='Confidence threshold for filtering predictions')
+    parser.add_argument('--fast-mode', action='store_true',
+                       help='Run in fast mode (skip boundary F-measure and fewer AP thresholds)')
+    
+    args = parser.parse_args()
+    
+    # Run main analysis
+    main(results_json=args.results_json, 
+         val_json=args.val_json, 
+         csv_path=args.csv_path,
+         cm_plot_path=args.cm_plot_path,
+         confidence_threshold=args.confidence_threshold,
+         fast_mode=args.fast_mode)
+    
+    # Create AP per category plot
+    plot_ap_per_category_from_csv(csv_path=args.csv_path, 
+                                   output_path=args.ap_plot_path)
