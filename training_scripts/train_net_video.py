@@ -311,24 +311,39 @@ def setup(args):
         "ytvis_fishway_train",
         {},
         "/data/fishway_ytvis/train.json",
-        "/data/fishway_ytvis/all_videos_mask"
+        "/data/fishway_ytvis/all_videos"
     )
     register_ytvis_instances(
         "ytvis_fishway_val",
         {},
-        "/data/fishway_ytvis/val_trimmed.json",
-        "/data/fishway_ytvis/all_videos_mask"
+        "/data/fishway_ytvis/val.json",
+        "/data/fishway_ytvis/all_videos"
     )
 
+    # Add debug flag to config
+    cfg.DEBUG = args.debug
+    
     cfg.freeze()
     default_setup(cfg, args)
     # Setup logger for "mask_former" module
     setup_logger(name="mask2former")
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="minvis")
+    
+    # Debug prints for window inference settings (only if debug is enabled)
+    if cfg.DEBUG:
+        print(f"[DEBUG] WINDOW_INFERENCE: {cfg.MODEL.MASK_FORMER.TEST.WINDOW_INFERENCE}")
+        print(f"[DEBUG] WINDOW_SIZE: {cfg.MODEL.MASK_FORMER.TEST.WINDOW_SIZE}")
+        print(f"[DEBUG] MAX_NUM: {cfg.MODEL.MASK_FORMER.TEST.MAX_NUM}")
+        print(f"[DEBUG] NUM_OBJECT_QUERIES: {cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES}")
+    
     return cfg
 
 
 def main(args):
+    # Memory optimization settings
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    
     cfg = setup(args)
 
     if args.eval_only:
@@ -346,23 +361,53 @@ def main(args):
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
 
-    # # Add periodic validation evaluation
-    eval_period = 356  # or any value you like
-    def eval_and_clear():
-        results = Trainer.test(cfg, trainer.model)
-        torch.cuda.empty_cache()
-        gc.collect()
-        return results
+    # Add memory cleanup hook to prevent OOM
+    class MemoryCleanupHook(hooks.HookBase):
+        def __init__(self, period=50):
+            super().__init__()
+            self.period = period
+            self.iter = 0
+            
+        def after_step(self):
+            self.iter += 1
+            if self.iter % self.period == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
+    
+    trainer.register_hooks([MemoryCleanupHook(period=50)])
 
-    trainer.register_hooks([
-        hooks.EvalHook(eval_period, eval_and_clear)
-    ])
+    # # Add periodic validation evaluation
+    # Set to None to disable evaluation during training (to avoid OOM)
+    # eval_period = None  # Set to 50 to enable evaluation, None to disable
+    # def eval_and_clear():
+    #     # Clear memory before evaluation
+    #     torch.cuda.empty_cache()
+    #     gc.collect()
+        
+    #     try:
+    #         results = Trainer.test(cfg, trainer.model)
+    #         # Clear memory after evaluation
+    #         torch.cuda.empty_cache()
+    #         gc.collect()
+    #         return results
+    #     except torch.cuda.OutOfMemoryError:
+    #         print("OOM during evaluation - skipping this evaluation")
+    #         torch.cuda.empty_cache()
+    #         gc.collect()
+    #         return {}
+
+    # if eval_period is not None:
+    #     trainer.register_hooks([
+    #         hooks.EvalHook(eval_period, eval_and_clear)
+    #     ])
 
     return trainer.train()
 
 
 if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+    parser = default_argument_parser()
+    parser.add_argument("--debug", action="store_true", help="Enable debug prints during training/evaluation")
+    args = parser.parse_args()
     #args.dist_url = 'tcp://127.0.0.1:50263'
     print("Command Line Args:", args)
     launch(
