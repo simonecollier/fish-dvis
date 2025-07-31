@@ -167,13 +167,14 @@ def create_train_val_jsons(
     all_vids_json,
     output_train_json,
     output_val_json,
-    categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic"],
+    categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic", "Rainbow Trout"],
     exclude_empty_train=True,
     balance=True,
     num_vids_val=2,
     num_vids_train=None,
     frame_skip=0,
-    random_seed=None
+    random_seed=None,
+    max_frames_with_fish=100
 ):
     """
     Create train and val YTVIS JSONs from a big all-videos YTVIS JSON.
@@ -184,6 +185,7 @@ def create_train_val_jsons(
     - num_vids_train: number of videos per class for train set (None = as many as possible)
     - frame_skip: 0 = include every frame, 1 = every 2nd frame, 2 = every 3rd frame, etc.
     - random_seed: if set, ensures reproducible splits
+    - max_frames_with_fish: maximum number of frames with fish to keep per video (default 100)
     """
     import copy
     if random_seed is not None:
@@ -241,22 +243,32 @@ def create_train_val_jsons(
             new_vids = []
             new_anns = []
             for v in vids:
-                frames_with_ann = vid_to_frames_with_ann[v['id']]
+                frames_with_ann = sorted(vid_to_frames_with_ann[v['id']])
                 if not frames_with_ann:
                     continue
+                # Cap the number of frames with fish if needed
+                if max_frames_with_fish is not None and len(frames_with_ann) > max_frames_with_fish:
+                    mid = len(frames_with_ann) // 2
+                    half = max_frames_with_fish // 2
+                    if max_frames_with_fish % 2 == 0:
+                        selected = frames_with_ann[mid-half:mid+half]
+                    else:
+                        selected = frames_with_ann[mid-half:mid+half+1]
+                    frames_with_ann = selected
                 first = min(frames_with_ann)
                 last = max(frames_with_ann)
-                # Trim file_names and update length
+                # Only keep the selected frames
+                keep_idxs = set(frames_with_ann)
                 v_new = copy.deepcopy(v)
-                v_new['file_names'] = v_new['file_names'][first:last+1]
+                v_new['file_names'] = [f for i, f in enumerate(v['file_names']) if i in keep_idxs]
                 v_new['length'] = len(v_new['file_names'])
                 new_vids.append(v_new)
                 # Trim segmentations/bboxes/areas for each annotation
                 for ann in [a for a in anns if a['video_id'] == v['id']]:
                     ann_new = copy.deepcopy(ann)
-                    ann_new['segmentations'] = ann_new['segmentations'][first:last+1]
-                    ann_new['bboxes'] = ann_new['bboxes'][first:last+1]
-                    ann_new['areas'] = ann_new['areas'][first:last+1]
+                    ann_new['segmentations'] = [s for i, s in enumerate(ann['segmentations']) if i in keep_idxs]
+                    ann_new['bboxes'] = [b for i, b in enumerate(ann['bboxes']) if i in keep_idxs]
+                    ann_new['areas'] = [a for i, a in enumerate(ann['areas']) if i in keep_idxs]
                     ann_new['length'] = len(ann_new['segmentations'])
                     new_anns.append(ann_new)
             vids = new_vids
@@ -303,8 +315,47 @@ def validate_ytvis(json_path):
 
     # Map video_id to its length
     video_lengths = {video["id"]: video["length"] for video in data["videos"]}
+    video_names = {video["id"]: video.get("file_names", [None])[0] for video in data["videos"]}
     errors_found = False
 
+    # Build category id to name mapping
+    cat_id_to_name = {cat["id"]: cat["name"] for cat in data["categories"]}
+
+    # Build mapping: class -> list of (video_id, num_frames)
+    class_to_videos = defaultdict(list)
+    video_to_class = defaultdict(set)
+    for ann in data["annotations"]:
+        video_id = ann["video_id"]
+        cat_id = ann["category_id"]
+        class_to_videos[cat_id].append(video_id)
+        video_to_class[video_id].add(cat_id)
+
+    # For each class, get unique videos and their frame counts
+    print("\n=== Video and Frame Counts Per Class ===")
+    for cat_id, video_ids in class_to_videos.items():
+        unique_videos = sorted(set(video_ids))
+        print(f"Class '{cat_id_to_name.get(cat_id, cat_id)}' ({cat_id}): {len(unique_videos)} videos")
+        for vid in unique_videos:
+            n_frames = video_lengths.get(vid, '?')
+            vname = video_names.get(vid, str(vid))
+            print(f"  Video ID {vid} (first file: {vname}): {n_frames} frames")
+        print()
+
+    # Print summary table
+    print("\n=== Summary Table ===")
+    print(f"{'Class':20} {'#Videos':>8} {'TotalFrames':>12} {'MeanFrames':>12} {'MedianFrames':>12} {'MaxFrames':>10} {'MinFrames':>10}")
+    for cat_id, video_ids in class_to_videos.items():
+        unique_videos = sorted(set(video_ids))
+        frame_counts = [video_lengths.get(vid, 0) for vid in unique_videos]
+        total_frames = sum(frame_counts)
+        mean_frames = np.mean(frame_counts) if frame_counts else 0
+        median_frames = np.median(frame_counts) if frame_counts else 0
+        max_frames = max(frame_counts) if frame_counts else 0
+        min_frames = min(frame_counts) if frame_counts else 0
+        cname = cat_id_to_name.get(cat_id, str(cat_id))
+        print(f"{cname:20} {len(unique_videos):8} {total_frames:12} {mean_frames:12.1f} {median_frames:12.1f} {max_frames:10} {min_frames:10}")
+
+    # Existing validation logic
     for ann in data["annotations"]:
         video_id = ann["video_id"]
         expected_len = video_lengths.get(video_id)
@@ -344,12 +395,13 @@ if __name__ == "__main__":
         all_vids_json="/data/fishway_ytvis/all_videos.json",
         output_train_json="/data/fishway_ytvis/train.json",
         output_val_json="/data/fishway_ytvis/val.json",
-        categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic"],
+        categories_to_include=["Chinook", "Coho", "Brown Trout", "Atlantic", "Rainbow Trout"],
         exclude_empty_train=True,
         balance=True,
         num_vids_val=2,
         num_vids_train=None,
-        frame_skip=3
+        frame_skip=0,
+        max_frames_with_fish=80
     )
 
     validate_ytvis("/data/fishway_ytvis/all_videos.json")
