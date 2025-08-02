@@ -133,6 +133,13 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
                 fn = file_names[idx]
                 mask = decode_rle(rle, height, width)
                 frame_masks[fn].append((mask, categories[category_id], score, category_colors[category_id]))
+        
+        # For each frame, keep only the mask with the highest score
+        for fn in frame_masks:
+            if frame_masks[fn]:
+                # Sort by score (highest first) and keep only the first one
+                frame_masks[fn].sort(key=lambda x: x[2], reverse=True)
+                frame_masks[fn] = [frame_masks[fn][0]]  # Keep only the highest scoring mask
 
         # Check if any frames have masks (only save videos with predictions)
         has_masks = any(len(masks) > 0 for masks in frame_masks.values())
@@ -170,9 +177,9 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
     print(f"\nProcessing complete. Videos saved to: {output_dir}")
 
 if __name__ == "__main__":
-    results_json = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/inference/results.json"
+    results_json = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/checkpoint_evaluations/checkpoint_0001655/inference/results.json"
     valid_json = "/data/fishway_ytvis/val.json"
     image_root = "/data/fishway_ytvis/all_videos"
-    output_dir = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/inference/video_predictions"
+    output_dir = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/checkpoint_evaluations/checkpoint_0001655/inference/video_predictions"
 
-    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0.01)
+    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0.1)
