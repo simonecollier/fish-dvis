@@ -72,7 +72,7 @@ def find_checkpoint_results(base_dir: str) -> List[str]:
     checkpoint_dirs.sort(key=extract_iteration)
     return checkpoint_dirs
 
-def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_threshold: float = 0.01, fast_mode: bool = False) -> bool:
+def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_threshold: float = 0.05, fast_mode: bool = False) -> bool:
     """
     Run mask metrics analysis for a single checkpoint.
     
@@ -376,7 +376,12 @@ def create_trend_analysis(df_summary: pd.DataFrame, output_dir: str) -> None:
             # Calculate improvement from first to last checkpoint
             first_val = valid_data.iloc[0]['map_50']
             last_val = valid_data.iloc[-1]['map_50']
-            improvement = ((last_val - first_val) / first_val) * 100
+            
+            # Avoid division by zero
+            if first_val > 0:
+                improvement = ((last_val - first_val) / first_val) * 100
+            else:
+                improvement = float('inf') if last_val > 0 else 0
             
             # Plot improvement over time
             improvements = []
@@ -384,7 +389,10 @@ def create_trend_analysis(df_summary: pd.DataFrame, output_dir: str) -> None:
                 if i == 0:
                     improvements.append(0)
                 else:
-                    current_improvement = ((valid_data.iloc[i]['map_50'] - first_val) / first_val) * 100
+                    if first_val > 0:
+                        current_improvement = ((valid_data.iloc[i]['map_50'] - first_val) / first_val) * 100
+                    else:
+                        current_improvement = float('inf') if valid_data.iloc[i]['map_50'] > 0 else 0
                     improvements.append(current_improvement)
             
             ax2.plot(valid_data['iteration'], improvements, 'o-', 
@@ -765,7 +773,7 @@ def main():
                        help='Run mask metrics analysis for checkpoints that don\'t have it')
     parser.add_argument('--skip-mask-metrics', action='store_true',
                        help='Skip mask metrics analysis and only create plots')
-    parser.add_argument('--confidence-threshold', type=float, default=0.01,
+    parser.add_argument('--confidence-threshold', type=float, default=0.05,
                        help='Confidence threshold for filtering predictions')
     parser.add_argument('--fast-mode', action='store_true',
                        help='Run in fast mode (skip expensive operations)')
