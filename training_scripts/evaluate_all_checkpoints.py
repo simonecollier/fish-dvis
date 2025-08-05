@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def find_checkpoints(model_dir: str) -> List[str]:
     """
     Find all checkpoint files in the model directory.
+    Excludes model_final.pth as it's redundant with the highest iteration checkpoint.
     
     Args:
         model_dir: Path to the model directory
@@ -34,6 +35,9 @@ def find_checkpoints(model_dir: str) -> List[str]:
     """
     checkpoint_pattern = os.path.join(model_dir, "model_*.pth")
     checkpoints = glob.glob(checkpoint_pattern)
+    
+    # Filter out model_final.pth as it's redundant
+    checkpoints = [cp for cp in checkpoints if not cp.endswith('model_final.pth')]
     
     # Sort by iteration number
     def extract_iteration(checkpoint_path):
