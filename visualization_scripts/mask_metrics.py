@@ -138,7 +138,7 @@ def compute_ap_at_iou(pred_by_video, gt_dict, iou_threshold, category_id):
         
     return ap
 
-def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="confusion_matrix.png", confidence_threshold=0.01, fast_mode=False):
+def main(results_json, val_json, csv_path="mask_metrics.csv", cm_plot_path="confusion_matrix.png", confidence_threshold=0.05, fast_mode=False):
     preds = load_json(results_json)
     gts = load_json(val_json)
 
@@ -559,7 +559,7 @@ if __name__ == "__main__":
                        help='Path to save confusion matrix plot')
     parser.add_argument('--ap-plot-path', type=str, default='AP_per_category.png',
                        help='Path to save AP per category plot')
-    parser.add_argument('--confidence-threshold', type=float, default=0.01,
+    parser.add_argument('--confidence-threshold', type=float, default=0.05,
                        help='Confidence threshold for filtering predictions')
     parser.add_argument('--fast-mode', action='store_true',
                        help='Run in fast mode (skip boundary F-measure and fewer AP thresholds)')
