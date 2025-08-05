@@ -67,7 +67,10 @@ def extract_config_differences(config1: dict, config2: dict) -> dict:
         'num_frames': {'model1': None, 'model2': None, 'different': False},
         'optimizer': {'model1': None, 'model2': None, 'different': False},
         'scheduler': {'model1': None, 'model2': None, 'different': False},
-        'data_augmentation': {'model1': None, 'model2': None, 'different': False}
+        'data_augmentations': {'model1': None, 'model2': None, 'different': False},
+        'lsj_augmentation': {'model1': None, 'model2': None, 'different': False},
+        'max_iterations': {'model1': None, 'model2': None, 'different': False},
+        'checkpoint_period': {'model1': None, 'model2': None, 'different': False}
     }
     
     if not config1 or not config2:
@@ -98,20 +101,52 @@ def extract_config_differences(config1: dict, config2: dict) -> dict:
         differences['num_frames']['different'] = True
     
     # Extract optimizer
-    opt1 = config1.get('SOLVER', {}).get('NAME', None)
-    opt2 = config2.get('SOLVER', {}).get('NAME', None)
+    opt1 = config1.get('SOLVER', {}).get('OPTIMIZER', None)
+    opt2 = config2.get('SOLVER', {}).get('OPTIMIZER', None)
     if opt1 != opt2:
         differences['optimizer']['model1'] = opt1
         differences['optimizer']['model2'] = opt2
         differences['optimizer']['different'] = True
     
     # Extract scheduler
-    sched1 = config1.get('SOLVER', {}).get('SCHEDULER', {}).get('NAME', None)
-    sched2 = config2.get('SOLVER', {}).get('SCHEDULER', {}).get('NAME', None)
+    sched1 = config1.get('SOLVER', {}).get('LR_SCHEDULER_NAME', None)
+    sched2 = config2.get('SOLVER', {}).get('LR_SCHEDULER_NAME', None)
     if sched1 != sched2:
         differences['scheduler']['model1'] = sched1
         differences['scheduler']['model2'] = sched2
         differences['scheduler']['different'] = True
+    
+    # Extract data augmentations
+    aug1 = config1.get('INPUT', {}).get('AUGMENTATIONS', [])
+    aug2 = config2.get('INPUT', {}).get('AUGMENTATIONS', [])
+    if aug1 != aug2:
+        differences['data_augmentations']['model1'] = aug1
+        differences['data_augmentations']['model2'] = aug2
+        differences['data_augmentations']['different'] = True
+    
+    # Extract LSJ augmentation settings
+    lsj_enabled1 = config1.get('INPUT', {}).get('LSJ_AUG', {}).get('ENABLED', None)
+    lsj_enabled2 = config2.get('INPUT', {}).get('LSJ_AUG', {}).get('ENABLED', None)
+    if lsj_enabled1 != lsj_enabled2:
+        differences['lsj_augmentation']['model1'] = lsj_enabled1
+        differences['lsj_augmentation']['model2'] = lsj_enabled2
+        differences['lsj_augmentation']['different'] = True
+    
+    # Extract max iterations
+    max_iter1 = config1.get('SOLVER', {}).get('MAX_ITER', None)
+    max_iter2 = config2.get('SOLVER', {}).get('MAX_ITER', None)
+    if max_iter1 != max_iter2:
+        differences['max_iterations']['model1'] = max_iter1
+        differences['max_iterations']['model2'] = max_iter2
+        differences['max_iterations']['different'] = True
+    
+    # Extract checkpoint period
+    cp1 = config1.get('SOLVER', {}).get('CHECKPOINT_PERIOD', None)
+    cp2 = config2.get('SOLVER', {}).get('CHECKPOINT_PERIOD', None)
+    if cp1 != cp2:
+        differences['checkpoint_period']['model1'] = cp1
+        differences['checkpoint_period']['model2'] = cp2
+        differences['checkpoint_period']['different'] = True
     
     return differences
 
@@ -288,12 +323,41 @@ def create_comparison_report(data1: dict, data2: dict, comparison: dict,
         f.write("CONFIGURATION DIFFERENCES\n")
         f.write("-" * 40 + "\n")
         differences_found = False
+        
+        # Define parameter display names
+        param_names = {
+            'learning_rate': 'Learning Rate',
+            'batch_size': 'Batch Size',
+            'num_frames': 'Number of Frames',
+            'optimizer': 'Optimizer',
+            'scheduler': 'Learning Rate Scheduler',
+            'data_augmentations': 'Data Augmentations',
+            'lsj_augmentation': 'LSJ Augmentation',
+            'max_iterations': 'Max Iterations',
+            'checkpoint_period': 'Checkpoint Period'
+        }
+        
         for param, diff in config_diff.items():
             if diff['different']:
                 differences_found = True
-                f.write(f"{param.replace('_', ' ').title()}:\n")
-                f.write(f"  • {data1['model_name']}: {diff['model1']}\n")
-                f.write(f"  • {data2['model_name']}: {diff['model2']}\n\n")
+                param_name = param_names.get(param, param.replace('_', ' ').title())
+                f.write(f"{param_name}:\n")
+                
+                # Handle special cases for better display
+                if param == 'data_augmentations':
+                    aug1 = diff['model1'] if diff['model1'] else 'None'
+                    aug2 = diff['model2'] if diff['model2'] else 'None'
+                    f.write(f"  • {data1['model_name']}: {aug1}\n")
+                    f.write(f"  • {data2['model_name']}: {aug2}\n")
+                elif param == 'lsj_augmentation':
+                    lsj1 = "Enabled" if diff['model1'] else "Disabled"
+                    lsj2 = "Enabled" if diff['model2'] else "Disabled"
+                    f.write(f"  • {data1['model_name']}: {lsj1}\n")
+                    f.write(f"  • {data2['model_name']}: {lsj2}\n")
+                else:
+                    f.write(f"  • {data1['model_name']}: {diff['model1']}\n")
+                    f.write(f"  • {data2['model_name']}: {diff['model2']}\n")
+                f.write("\n")
         
         if not differences_found:
             f.write("No significant configuration differences detected.\n\n")
