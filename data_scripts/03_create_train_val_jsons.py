@@ -10,6 +10,7 @@ def print_dataset_statistics(ytvis_data, dataset_name):
     - Number of videos per category
     - Number of annotated frames per category
     - Frame statistics (mean, median, min, max) per category
+    - Videos with fewer than 30 annotated frames per category
     """
     print(f"\n{'='*80}")
     print(f"{dataset_name.upper()} DATASET STATISTICS")
@@ -23,6 +24,7 @@ def print_dataset_statistics(ytvis_data, dataset_name):
     cat_annotated_frames = defaultdict(int)
     cat_annotated_frames_per_video = defaultdict(list)  # Track annotated frames per video
     cat_video_ids = defaultdict(set)
+    cat_low_frame_videos = defaultdict(list)  # Track videos with <30 frames
     
     # Process videos and annotations
     video_id_to_length = {video['id']: video['length'] for video in ytvis_data['videos']}
@@ -41,6 +43,10 @@ def print_dataset_statistics(ytvis_data, dataset_name):
         
         # Collect annotated frames per video for this category
         cat_annotated_frames_per_video[cat_id].append(annotated_frames)
+        
+        # Track videos with fewer than 30 frames
+        if annotated_frames < 30:
+            cat_low_frame_videos[cat_id].append((video_id, annotated_frames))
     
     # Calculate video counts
     for cat_id, video_ids in cat_video_ids.items():
@@ -66,6 +72,25 @@ def print_dataset_statistics(ytvis_data, dataset_name):
             frame_stats = "N/A"
         
         print(f"{cat_name:<20} {video_count:<8} {annotated_frames:<18} {frame_stats:<35}")
+    
+    # Print videos with fewer than 30 frames
+    print(f"\n{'Videos with <30 annotated frames by category:'}")
+    print("-" * 85)
+    
+    total_low_frame_videos = 0
+    for cat_id in sorted(cat_low_frame_videos.keys()):
+        cat_name = cat_id_to_name.get(cat_id, f"Unknown_{cat_id}")
+        low_frame_videos = cat_low_frame_videos[cat_id]
+        
+        if low_frame_videos:
+            print(f"{cat_name}: {len(low_frame_videos)} videos")
+            for video_id, frame_count in low_frame_videos:
+                print(f"  - Video {video_id}: {frame_count} frames")
+            total_low_frame_videos += len(low_frame_videos)
+        else:
+            print(f"{cat_name}: 0 videos")
+    
+    print(f"\nTotal videos with <30 frames: {total_low_frame_videos}")
     
     # Print overall statistics
     print("\n" + "-" * 85)
@@ -102,8 +127,9 @@ def create_train_val_jsons(
     num_vids_train=None,
     frame_skip=0,
     random_seed=None,
-    max_frames_train=75,
-    max_frames_val=45
+    max_anns_train=75,
+    max_anns_val=45,
+    min_anns_per_video=None
 ):
     """
     Create train and val YTVIS JSONs from a big all-videos YTVIS JSON.
@@ -114,8 +140,9 @@ def create_train_val_jsons(
     - num_vids_train: number of videos per class for train set (None = as many as possible)
     - frame_skip: 0 = include every frame, 1 = every 2nd frame, 2 = every 3rd frame, etc.
     - random_seed: if set, ensures reproducible splits
-    - max_frames_train: maximum number of frames to keep per video in training set (default 75)
-    - max_frames_val: maximum number of frames to keep per video in validation set (default 45)
+    - max_anns_train: maximum number of annotated frames to keep per video in training set (default 75)
+    - max_anns_val: maximum number of annotated frames to keep per video in validation set (default 45)
+    - min_anns_per_video: minimum number of annotated frames required per video (None = no filtering)
     """
     if random_seed is not None:
         random.seed(random_seed)
@@ -130,6 +157,38 @@ def create_train_val_jsons(
     for ann in data['annotations']:
         if ann['category_id'] in cat_ids:
             video_to_cats[ann['video_id']].add(ann['category_id'])
+    
+    # Filter out videos with fewer than minimum annotations if specified
+    if min_anns_per_video is not None:
+        print(f"\nFiltering videos with fewer than {min_anns_per_video} annotated frames...")
+        
+        # Count annotated frames per video
+        video_ann_counts = defaultdict(int)
+        for ann in data['annotations']:
+            if ann['category_id'] in cat_ids:
+                annotated_frames = sum(1 for seg in ann['segmentations'] if seg is not None)
+                video_ann_counts[ann['video_id']] += annotated_frames
+        
+        # Find videos to remove
+        videos_to_remove = []
+        for video_id, ann_count in video_ann_counts.items():
+            if ann_count < min_anns_per_video:
+                videos_to_remove.append(video_id)
+        
+        if videos_to_remove:
+            print(f"Removing {len(videos_to_remove)} videos with insufficient annotations:")
+            for video_id in videos_to_remove:
+                print(f"  - Video {video_id}: {video_ann_counts[video_id]} annotated frames")
+            
+            # Remove videos from video_to_cats
+            for video_id in videos_to_remove:
+                if video_id in video_to_cats:
+                    del video_to_cats[video_id]
+            
+            print(f"Remaining videos after filtering: {len(video_to_cats)}")
+        else:
+            print("No videos removed during filtering")
+    
     # Build val set
     val_videos = set()
     for cat_id in cat_ids:
@@ -157,7 +216,7 @@ def create_train_val_jsons(
                 balanced_train_videos.update(random.sample(vids, n))
         train_videos = balanced_train_videos
     # Filter videos/annotations for train/val
-    def filter_json(videoset, trim_empty, max_frames):
+    def filter_json(videoset, trim_empty, max_anns):
         vids = [v for v in data['videos'] if v['id'] in videoset]
         anns = [a for a in data['annotations'] if a['video_id'] in videoset and a['category_id'] in cat_ids]
         # Optionally trim empty frames (for train)
@@ -176,11 +235,11 @@ def create_train_val_jsons(
                 if not frames_with_ann:
                     continue
                 # Cap the number of frames if needed
-                if max_frames is not None and len(frames_with_ann) > max_frames:
+                if max_anns is not None and len(frames_with_ann) > max_anns:
                     # Center the selection around the middle of the video
                     mid = len(frames_with_ann) // 2
-                    half = max_frames // 2
-                    if max_frames % 2 == 0:
+                    half = max_anns // 2
+                    if max_anns % 2 == 0:
                         selected = frames_with_ann[mid-half:mid+half]
                     else:
                         selected = frames_with_ann[mid-half:mid+half+1]
@@ -218,8 +277,8 @@ def create_train_val_jsons(
                 ann['areas'] = skip_frames(ann['areas'])
                 ann['length'] = len(ann['segmentations'])
         return vids, anns
-    train_vids, train_anns = filter_json(train_videos, trim_empty=exclude_empty_train, max_frames=max_frames_train)
-    val_vids, val_anns = filter_json(val_videos, trim_empty=False, max_frames=max_frames_val)
+    train_vids, train_anns = filter_json(train_videos, trim_empty=exclude_empty_train, max_anns=max_anns_train)
+    val_vids, val_anns = filter_json(val_videos, trim_empty=False, max_anns=max_anns_val)
     # Build output jsons
     def build_json(vids, anns):
         used_cat_ids = set(a['category_id'] for a in anns)
@@ -260,6 +319,7 @@ if __name__ == "__main__":
         num_vids_val=3,
         num_vids_train=None,
         frame_skip=0,
-        max_frames_train=75,  # 5 windows of 15 frames for training
-        max_frames_val=45     # 3 windows of 15 frames for validation
+        max_anns_train=75,  # 5 windows of 15 frames for training
+        max_anns_val=45,     # 3 windows of 15 frames for validation
+        min_anns_per_video=30  # Filter out videos with fewer than 30 annotated frames
     ) 
