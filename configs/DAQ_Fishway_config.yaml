@@ -28,7 +28,7 @@ DATASETS:
   TEST: ("ytvis_fishway_val",)  # testing dataset
 
 SOLVER:
-  IMS_PER_BATCH: 1  # Images per batch... Adjust based on your GPU memory
+  IMS_PER_BATCH: 1  # Reduced batch size for higher resolution training
   BASE_LR: 0.0001  # base learning rate... keep low for fine tuning
   STEPS: (1656, 2208)     # Iterations at which the learning rate is decreased (60% and 80% of 2760)
   MAX_ITER: 2760     # Maximum number of training iterations (15 epochs - 184 vids)
@@ -43,14 +43,14 @@ SOLVER:
     NORM_TYPE: 2.0
 
 INPUT:
-  # Enhanced size variations for better generalization
-  MIN_SIZE_TRAIN: (320, 352, 392, 416, 448, 480, 512, 544, 576, 608, 640)
+  # Higher resolution training with enhanced size variations for better generalization
+  MIN_SIZE_TRAIN: (480, 512, 544, 576, 608, 640)
   MIN_SIZE_TRAIN_SAMPLING: "choice_by_clip"  # Sample different sizes per clip
-  MAX_SIZE_TRAIN: 768  # Increased max size for better resolution
+  MAX_SIZE_TRAIN: 640  # Increased max size for higher resolution training
   
   # Testing sizes
-  MIN_SIZE_TEST: 224 # shorter side of images is resized to this value during testing
-  MAX_SIZE_TEST: 320 # longer side is capped at this value during testing
+  MIN_SIZE_TEST: 480 # shorter side of images is resized to this value during testing
+  MAX_SIZE_TEST: 640 # longer side is capped at this value during testing
   
   # Frame sampling
   SAMPLING_FRAME_NUM: 15 # number of frames to sample from each video clip during training
@@ -66,20 +66,32 @@ INPUT:
   CROP:
     ENABLED: True
     TYPE: "absolute_range"
-    SIZE: (384, 600)
+    SIZE: (480, 640)  # Increased crop size for higher resolution
   
   # Large Scale Jittering for robust training
   LSJ_AUG:
     ENABLED: True
-    IMAGE_SIZE: 768
-    MIN_SCALE: 0.1
-    MAX_SCALE: 2.0
+    IMAGE_SIZE: 640  # Increased LSJ image size
+    MIN_SCALE: 0.5
+    MAX_SCALE: 1.0
   
   # Supported augmentations (motion-preserving)
   AUGMENTATIONS: ['brightness', 'contrast', 'saturation']  # Motion-preserving color augmentations
   # Note: 'rotation' removed as it would distort motion trajectories
 
+TEST:
+  AUG:
+    ENABLED: true
+    FLIP: true
+    MAX_SIZE: 640
+    MIN_SIZES:
+    - 480
+    - 512
+    - 544
+    - 576
+    - 608
+    - 640
 DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: True # whether to filter out images with no annotations
 
-OUTPUT_DIR: '/store/simone/dvis-model-outputs/trained_models/base_model_unmasked'
+OUTPUT_DIR: '/store/simone/dvis-model-outputs/trained_models/model0_unmasked'
