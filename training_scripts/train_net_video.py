@@ -18,6 +18,12 @@ import copy
 import itertools
 import logging
 import os
+import sys
+
+# Add the project root to Python path to import our custom modules
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 import gc
 
 from collections import OrderedDict
@@ -71,7 +77,7 @@ from dvis_Plus import (
 from dvis_daq.config import add_daq_config
 
 #from data_scripts.ytvis_loader import register_all_ytvis_fishway
-from dvis_Plus.data_video.datasets.ytvis import register_ytvis_instances
+from data_scripts.ytvis_loader import register_ytvis_instances
 
 class Trainer(DefaultTrainer):
     """
@@ -306,19 +312,161 @@ def setup(args):
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
 
-    # Register custom datasets
-    register_ytvis_instances(
-        "ytvis_fishway_train",
-        {},
-        "/data/fishway_ytvis/train.json",
-        "/data/fishway_ytvis/all_videos"
-    )
-    register_ytvis_instances(
-        "ytvis_fishway_val",
-        {},
-        "/data/fishway_ytvis/val.json",
-        "/data/fishway_ytvis/all_videos"
-    )
+    # Get test frame stride from config
+    test_frame_stride = getattr(cfg.INPUT, 'TEST_SAMPLING_FRAME_STRIDE', 
+                               getattr(cfg.INPUT, 'SAMPLING_FRAME_STRIDE', 1))
+    
+    # Ensure stride-adjusted validation JSON exists if needed
+    data_scripts_path = os.path.join(project_root, 'data_scripts')
+    if data_scripts_path not in sys.path:
+        sys.path.insert(0, data_scripts_path)
+    
+    try:
+        from create_stride_adjusted_val_json import ensure_stride_adjusted_json
+        
+        val_json_path = ensure_stride_adjusted_json(
+            original_json_path="/data/fishway_ytvis/val.json",
+            frame_stride=test_frame_stride,
+            model_output_dir=cfg.OUTPUT_DIR,
+            verbose=True
+        )
+        
+        # CRITICAL: If using stride-adjusted JSON, disable TEST frame stride in the data loader
+        # to prevent double-striding (JSON is already stride-adjusted)
+        # NOTE: We only modify TEST_SAMPLING_FRAME_STRIDE to preserve training stride behavior
+        if test_frame_stride > 1 and "stride" in val_json_path:
+            print(f"✓ Using stride-adjusted JSON - disabling TEST frame stride to prevent double-striding")
+            print(f"  → Training stride ({cfg.INPUT.SAMPLING_FRAME_STRIDE}) remains unchanged")
+            print(f"  → Test stride changed: {test_frame_stride} → 1")
+            cfg.INPUT.TEST_SAMPLING_FRAME_STRIDE = 1
+        
+    except ImportError as e:
+        print(f"Warning: Could not import stride adjustment utility: {e}")
+        print("Using original validation JSON")
+        val_json_path = "/data/fishway_ytvis/val.json"
+    
+    # Register multiple datasets - you can reference any of these in your config
+    datasets_to_register = {
+        # Fishway datasets
+        "ytvis_fishway_train": {
+            "json_path": "/data/fishway_ytvis/train.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val": {
+            "json_path": "/data/fishway_ytvis/val.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride1": {
+            "json_path": "/data/fishway_ytvis/train_stride1.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride1": {
+            "json_path": "/data/fishway_ytvis/val_stride1.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_camera0": {
+            "json_path": "/data/fishway_ytvis/train_camera0.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_camera0": {
+            "json_path": "/data/fishway_ytvis/val_camera0.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride1_all": {
+            "json_path": "/data/fishway_ytvis/val_stride1_all.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride2": {
+            "json_path": "/data/fishway_ytvis/train_stride2.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride2": {
+            "json_path": "/data/fishway_ytvis/val_stride2.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride3": {
+            "json_path": "/data/fishway_ytvis/train_stride3.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride3": {
+            "json_path": "/data/fishway_ytvis/val_stride3.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride4": {
+            "json_path": "/data/fishway_ytvis/train_stride4.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride4": {
+            "json_path": "/data/fishway_ytvis/val_stride4.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride5": {
+            "json_path": "/data/fishway_ytvis/train_stride5.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride5": {
+            "json_path": "/data/fishway_ytvis/val_stride5.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_train_stride6": {
+            "json_path": "/data/fishway_ytvis/train_stride6.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        "ytvis_fishway_val_stride6": {
+            "json_path": "/data/fishway_ytvis/val_stride6.json",
+            "image_root": "/data/fishway_ytvis/all_videos"
+        },
+        # Add more datasets here as needed
+        # "ytvis_custom_dataset": {
+        #     "json_path": "/path/to/custom/dataset.json",
+        #     "image_root": "/path/to/custom/images"
+        # },
+    }
+    
+    # Check if config specifies which datasets to register (optional)
+    datasets_to_use = getattr(cfg, 'DATASETS_TO_REGISTER', None)
+    if datasets_to_use is not None:
+        # Only register datasets specified in config
+        datasets_to_register = {k: v for k, v in datasets_to_register.items() if k in datasets_to_use}
+        print(f"Registering only specified datasets: {datasets_to_use}")
+
+    # During evaluation, only register the test datasets referenced by the config
+    if args.eval_only:
+        test_datasets = list(getattr(cfg.DATASETS, 'TEST', []))
+        if test_datasets:
+            datasets_to_register = {k: v for k, v in datasets_to_register.items() if k in test_datasets}
+            print(f"Eval-only run: registering only test datasets: {test_datasets}")
+
+    # Apply VAL_JSON_OVERRIDE before any registration, so we don't touch missing /data paths
+    val_json_override = os.environ.get("VAL_JSON_OVERRIDE")
+    if val_json_override and datasets_to_register:
+        print(f"VAL_JSON_OVERRIDE detected -> {val_json_override}")
+        for name in list(datasets_to_register.keys()):
+            if not args.eval_only or name in getattr(cfg.DATASETS, 'TEST', []):
+                datasets_to_register[name] = {
+                    **datasets_to_register[name],
+                    "json_path": val_json_override,
+                }
+        # Also set TEST_SAMPLING_FRAME_STRIDE to 1 when overriding (to avoid double-stride if any)
+        if hasattr(cfg.INPUT, 'TEST_SAMPLING_FRAME_STRIDE'):
+            cfg.INPUT.TEST_SAMPLING_FRAME_STRIDE = 1
+    
+    # Register all datasets (skip if JSON does not exist)
+    for dataset_name, dataset_info in datasets_to_register.items():
+        json_path = dataset_info["json_path"]
+        image_root = dataset_info["image_root"]
+        if not os.path.exists(json_path):
+            print(f"[WARN] Skipping dataset '{dataset_name}' - JSON not found: {json_path}")
+            continue
+        register_ytvis_instances(
+            dataset_name,
+            {},
+            json_path,
+            image_root,
+        )
+        print(f"Registered dataset: {dataset_name}")
+
+    # (Override already applied prior to registration if present)
 
     # Add debug flag to config
     cfg.DEBUG = args.debug
