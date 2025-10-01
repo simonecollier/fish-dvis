@@ -59,94 +59,51 @@ def load_model_analysis_data(model_dir: str) -> dict:
 
 def extract_config_differences(config1: dict, config2: dict) -> dict:
     """
-    Extract key differences between two configuration files.
+    Extract ALL differences between two configuration files.
+    This function recursively compares every parameter to ensure comprehensive tracking.
     """
-    differences = {
-        'learning_rate': {'model1': None, 'model2': None, 'different': False},
-        'batch_size': {'model1': None, 'model2': None, 'different': False},
-        'num_frames': {'model1': None, 'model2': None, 'different': False},
-        'optimizer': {'model1': None, 'model2': None, 'different': False},
-        'scheduler': {'model1': None, 'model2': None, 'different': False},
-        'data_augmentations': {'model1': None, 'model2': None, 'different': False},
-        'lsj_augmentation': {'model1': None, 'model2': None, 'different': False},
-        'max_iterations': {'model1': None, 'model2': None, 'different': False},
-        'checkpoint_period': {'model1': None, 'model2': None, 'different': False}
-    }
+    def flatten_dict(d, parent_key='', sep='.'):
+        """Flatten nested dictionary with dot notation."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+    
+    def compare_values(val1, val2):
+        """Compare two values, handling different types."""
+        if isinstance(val1, (list, tuple)) and isinstance(val2, (list, tuple)):
+            return list(val1) != list(val2)
+        elif isinstance(val1, dict) and isinstance(val2, dict):
+            return val1 != val2
+        else:
+            return val1 != val2
     
     if not config1 or not config2:
-        return differences
+        return {'error': 'One or both configs are None'}
     
-    # Extract learning rate
-    lr1 = config1.get('SOLVER', {}).get('BASE_LR', None)
-    lr2 = config2.get('SOLVER', {}).get('BASE_LR', None)
-    if lr1 != lr2:
-        differences['learning_rate']['model1'] = lr1
-        differences['learning_rate']['model2'] = lr2
-        differences['learning_rate']['different'] = True
+    # Flatten both configs
+    flat_config1 = flatten_dict(config1)
+    flat_config2 = flatten_dict(config2)
     
-    # Extract batch size
-    bs1 = config1.get('SOLVER', {}).get('IMS_PER_BATCH', None)
-    bs2 = config2.get('SOLVER', {}).get('IMS_PER_BATCH', None)
-    if bs1 != bs2:
-        differences['batch_size']['model1'] = bs1
-        differences['batch_size']['model2'] = bs2
-        differences['batch_size']['different'] = True
+    # Get all unique keys
+    all_keys = set(flat_config1.keys()) | set(flat_config2.keys())
     
-    # Extract frame count
-    frames1 = config1.get('MODEL', {}).get('VIDEO', {}).get('NUM_FRAMES', None)
-    frames2 = config2.get('MODEL', {}).get('VIDEO', {}).get('NUM_FRAMES', None)
-    if frames1 != frames2:
-        differences['num_frames']['model1'] = frames1
-        differences['num_frames']['model2'] = frames2
-        differences['num_frames']['different'] = True
+    differences = {}
     
-    # Extract optimizer
-    opt1 = config1.get('SOLVER', {}).get('OPTIMIZER', None)
-    opt2 = config2.get('SOLVER', {}).get('OPTIMIZER', None)
-    if opt1 != opt2:
-        differences['optimizer']['model1'] = opt1
-        differences['optimizer']['model2'] = opt2
-        differences['optimizer']['different'] = True
-    
-    # Extract scheduler
-    sched1 = config1.get('SOLVER', {}).get('LR_SCHEDULER_NAME', None)
-    sched2 = config2.get('SOLVER', {}).get('LR_SCHEDULER_NAME', None)
-    if sched1 != sched2:
-        differences['scheduler']['model1'] = sched1
-        differences['scheduler']['model2'] = sched2
-        differences['scheduler']['different'] = True
-    
-    # Extract data augmentations
-    aug1 = config1.get('INPUT', {}).get('AUGMENTATIONS', [])
-    aug2 = config2.get('INPUT', {}).get('AUGMENTATIONS', [])
-    if aug1 != aug2:
-        differences['data_augmentations']['model1'] = aug1
-        differences['data_augmentations']['model2'] = aug2
-        differences['data_augmentations']['different'] = True
-    
-    # Extract LSJ augmentation settings
-    lsj_enabled1 = config1.get('INPUT', {}).get('LSJ_AUG', {}).get('ENABLED', None)
-    lsj_enabled2 = config2.get('INPUT', {}).get('LSJ_AUG', {}).get('ENABLED', None)
-    if lsj_enabled1 != lsj_enabled2:
-        differences['lsj_augmentation']['model1'] = lsj_enabled1
-        differences['lsj_augmentation']['model2'] = lsj_enabled2
-        differences['lsj_augmentation']['different'] = True
-    
-    # Extract max iterations
-    max_iter1 = config1.get('SOLVER', {}).get('MAX_ITER', None)
-    max_iter2 = config2.get('SOLVER', {}).get('MAX_ITER', None)
-    if max_iter1 != max_iter2:
-        differences['max_iterations']['model1'] = max_iter1
-        differences['max_iterations']['model2'] = max_iter2
-        differences['max_iterations']['different'] = True
-    
-    # Extract checkpoint period
-    cp1 = config1.get('SOLVER', {}).get('CHECKPOINT_PERIOD', None)
-    cp2 = config2.get('SOLVER', {}).get('CHECKPOINT_PERIOD', None)
-    if cp1 != cp2:
-        differences['checkpoint_period']['model1'] = cp1
-        differences['checkpoint_period']['model2'] = cp2
-        differences['checkpoint_period']['different'] = True
+    for key in sorted(all_keys):
+        val1 = flat_config1.get(key, None)
+        val2 = flat_config2.get(key, None)
+        
+        if compare_values(val1, val2):
+            differences[key] = {
+                'model1': val1,
+                'model2': val2,
+                'different': True
+            }
     
     return differences
 
@@ -322,45 +279,71 @@ def create_comparison_report(data1: dict, data2: dict, comparison: dict,
         # Configuration differences
         f.write("CONFIGURATION DIFFERENCES\n")
         f.write("-" * 40 + "\n")
-        differences_found = False
         
-        # Define parameter display names
-        param_names = {
-            'learning_rate': 'Learning Rate',
-            'batch_size': 'Batch Size',
-            'num_frames': 'Number of Frames',
-            'optimizer': 'Optimizer',
-            'scheduler': 'Learning Rate Scheduler',
-            'data_augmentations': 'Data Augmentations',
-            'lsj_augmentation': 'LSJ Augmentation',
-            'max_iterations': 'Max Iterations',
-            'checkpoint_period': 'Checkpoint Period'
-        }
-        
-        for param, diff in config_diff.items():
-            if diff['different']:
-                differences_found = True
-                param_name = param_names.get(param, param.replace('_', ' ').title())
-                f.write(f"{param_name}:\n")
-                
-                # Handle special cases for better display
-                if param == 'data_augmentations':
-                    aug1 = diff['model1'] if diff['model1'] else 'None'
-                    aug2 = diff['model2'] if diff['model2'] else 'None'
-                    f.write(f"  • {data1['model_name']}: {aug1}\n")
-                    f.write(f"  • {data2['model_name']}: {aug2}\n")
-                elif param == 'lsj_augmentation':
-                    lsj1 = "Enabled" if diff['model1'] else "Disabled"
-                    lsj2 = "Enabled" if diff['model2'] else "Disabled"
-                    f.write(f"  • {data1['model_name']}: {lsj1}\n")
-                    f.write(f"  • {data2['model_name']}: {lsj2}\n")
-                else:
-                    f.write(f"  • {data1['model_name']}: {diff['model1']}\n")
-                    f.write(f"  • {data2['model_name']}: {diff['model2']}\n")
-                f.write("\n")
-        
-        if not differences_found:
-            f.write("No significant configuration differences detected.\n\n")
+        if 'error' in config_diff:
+            f.write(f"Error: {config_diff['error']}\n\n")
+        elif not config_diff:
+            f.write("No configuration differences detected.\n\n")
+        else:
+            f.write(f"Found {len(config_diff)} parameter differences:\n\n")
+            
+            # Group differences by category for better readability
+            categories = {
+                'SOLVER': [],
+                'INPUT': [],
+                'MODEL': [],
+                'DATASETS': [],
+                'DATALOADER': [],
+                'TEST': [],
+                'OTHER': []
+            }
+            
+            for param, diff in config_diff.items():
+                if diff['different']:
+                    category = param.split('.')[0] if '.' in param else 'OTHER'
+                    if category in categories:
+                        categories[category].append((param, diff))
+                    else:
+                        categories['OTHER'].append((param, diff))
+            
+            # Print differences by category
+            for category, params in categories.items():
+                if params:
+                    f.write(f"{category} PARAMETERS:\n")
+                    f.write("-" * 20 + "\n")
+                    
+                    for param, diff in params:
+                        # Format parameter name for display
+                        param_display = param.replace('_', ' ').title()
+                        if '.' in param:
+                            param_display = param.split('.', 1)[1].replace('_', ' ').title()
+                        
+                        f.write(f"{param_display}:\n")
+                        
+                        # Handle different value types for better display
+                        val1 = diff['model1']
+                        val2 = diff['model2']
+                        
+                        if isinstance(val1, (list, tuple)) or isinstance(val2, (list, tuple)):
+                            f.write(f"  • {data1['model_name']}: {val1}\n")
+                            f.write(f"  • {data2['model_name']}: {val2}\n")
+                        elif isinstance(val1, bool) or isinstance(val2, bool):
+                            bool1 = "True" if val1 else "False"
+                            bool2 = "True" if val2 else "False"
+                            f.write(f"  • {data1['model_name']}: {bool1}\n")
+                            f.write(f"  • {data2['model_name']}: {bool2}\n")
+                        elif val1 is None:
+                            f.write(f"  • {data1['model_name']}: None\n")
+                            f.write(f"  • {data2['model_name']}: {val2}\n")
+                        elif val2 is None:
+                            f.write(f"  • {data1['model_name']}: {val1}\n")
+                            f.write(f"  • {data2['model_name']}: None\n")
+                        else:
+                            f.write(f"  • {data1['model_name']}: {val1}\n")
+                            f.write(f"  • {data2['model_name']}: {val2}\n")
+                        f.write("\n")
+            
+            f.write("\n")
         
         # Performance comparison
         f.write("PERFORMANCE COMPARISON\n")
@@ -424,19 +407,34 @@ def create_comparison_report(data1: dict, data2: dict, comparison: dict,
         # Configuration recommendations
         f.write("\nConfiguration Recommendations:\n")
         
-        # Learning rate recommendations
-        if config_diff['learning_rate']['different']:
-            lr1 = config_diff['learning_rate']['model1']
-            lr2 = config_diff['learning_rate']['model2']
-            if lr1 > lr2:
-                better_lr = data1['model_name']
-                better_lr_val = lr1
-            else:
-                better_lr = data2['model_name']
-                better_lr_val = lr2
-            
-            f.write(f"  💡 Learning rate {better_lr_val} ({better_lr}) performed better\n")
-            f.write(f"  💡 Consider using {better_lr_val} for future training\n")
+        # Key parameter recommendations
+        key_params = {
+            'SOLVER.BASE_LR': 'Learning Rate',
+            'SOLVER.IMS_PER_BATCH': 'Batch Size',
+            'SOLVER.MAX_ITER': 'Training Duration',
+            'INPUT.MIN_SIZE_TRAIN': 'Training Resolution',
+            'INPUT.MAX_SIZE_TRAIN': 'Max Training Resolution',
+            'INPUT.MIN_SIZE_TEST': 'Test Resolution',
+            'INPUT.MAX_SIZE_TEST': 'Max Test Resolution'
+        }
+        
+        for param_key, param_name in key_params.items():
+            if param_key in config_diff:
+                diff = config_diff[param_key]
+                val1 = diff['model1']
+                val2 = diff['model2']
+                
+                # Determine which value performed better based on performance comparison
+                better_model = None
+                if comparison['best_performance']:
+                    # Use IoU as primary metric for recommendations
+                    if 'mean_iou' in comparison['best_performance']:
+                        better_model = comparison['best_performance']['mean_iou']['better_model']
+                
+                if better_model:
+                    better_val = val1 if better_model == data1['model_name'] else val2
+                    f.write(f"  💡 {param_name}: {better_val} ({better_model}) performed better\n")
+                    f.write(f"  💡 Consider using {better_val} for future training\n")
         
         # Training duration recommendations
         if comparison['training_dynamics']:
@@ -452,6 +450,11 @@ def create_comparison_report(data1: dict, data2: dict, comparison: dict,
             more_stable = comparison['stability']['more_stable']
             f.write(f"  💡 {more_stable} shows more stable training\n")
             f.write(f"  💡 Consider using similar configuration for production\n")
+        
+        # Resolution-specific recommendations
+        if 'INPUT.MIN_SIZE_TRAIN' in config_diff or 'INPUT.MAX_SIZE_TRAIN' in config_diff:
+            f.write(f"  💡 Resolution differences detected - consider impact on performance vs training time\n")
+            f.write(f"  💡 Higher resolution may improve accuracy but increase training time\n")
         
         f.write("\n" + "=" * 80 + "\n")
         f.write("Report generated by compare_models.py\n")
