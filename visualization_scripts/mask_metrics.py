@@ -16,7 +16,7 @@ from io import StringIO
 
 # Import DVIS-DAQ evaluation functions
 try:
-    from dvis_daq_eval import compute_dvis_daq_metrics, compute_per_video_metrics
+    from dvis_daq_eval import compute_dvis_daq_metrics
     DVIS_DAQ_AVAILABLE = True
 except ImportError:
     print("Warning: DVIS-DAQ evaluation not available. Using custom implementation.")
@@ -91,19 +91,6 @@ def compute_dvis_daq_metrics_wrapper(preds, gts, val_json_path):
         return result
     except Exception as e:
         print(f"Error in DVIS-DAQ evaluation: {e}")
-        return None
-
-def compute_per_video_metrics_wrapper(preds, gts, val_json_path):
-    """
-    Wrapper function to call the per-video DVIS-DAQ evaluation methodology.
-    """
-    try:
-        # Call the per-video DVIS-DAQ evaluation function directly
-        from dvis_daq_eval import compute_per_video_metrics
-        result = compute_per_video_metrics(preds, val_json_path)
-        return result
-    except Exception as e:
-        print(f"Error in per-video DVIS-DAQ evaluation: {e}")
         return None
 
 def compute_frame_level_coco_metrics(preds, gts, iou_thresholds=None):
