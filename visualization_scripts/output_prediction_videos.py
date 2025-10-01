@@ -90,6 +90,11 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
     np.random.seed(42)
     category_colors = {cat_id: tuple(np.random.randint(0, 256, 3).tolist()) for cat_id in categories}
 
+    # Group ALL predictions by video_id (before filtering by threshold)
+    all_preds_by_video = {}
+    for pred in predictions:
+        all_preds_by_video.setdefault(pred["video_id"], []).append(pred)
+    
     # Group predictions by video_id and filter by score threshold
     preds_by_video = {}
     for pred in predictions:
@@ -98,9 +103,14 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
 
     print(f"Found {len(preds_by_video)} videos with predictions above threshold {score_thresh}")
     
+    # Track videos that don't meet criteria
+    skipped_videos = []
+    
     # Process each video that has predictions
     for video_id, video_preds in tqdm(preds_by_video.items(), desc="Processing videos"):
         if video_id not in video_info:
+            folder_name = f"video_id_{video_id}"  # Fallback name
+            skipped_videos.append((folder_name, "Video ID not found in validation JSON"))
             print(f"Warning: Video id {video_id} not found in valid_json, skipping.")
             continue
 
@@ -113,37 +123,31 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
         # Get true species for this video
         true_species = true_species_by_video.get(video_id, "Unknown")
         
+        # Select the prediction with the highest score for this video
+        best_pred = max(video_preds, key=lambda x: x["score"])
+        
         # Print predictions for this video
         print(f"\nVideo {video_id} ({folder_name}):")
         print(f"  True species: {true_species}")
-        for pred in video_preds:
-            category_name = categories[pred["category_id"]]
-            score = pred["score"]
-            print(f"  - {category_name}: {score:.4f}")
-
-        # For each frame, collect all masks for all objects
-        frame_masks = {fn: [] for fn in file_names}
-        for pred in video_preds:
-            category_id = pred["category_id"]
-            segmentations = pred["segmentations"]
-            score = pred["score"]
-            for idx, rle in enumerate(segmentations):
-                if idx >= len(file_names):
-                    continue
-                fn = file_names[idx]
-                mask = decode_rle(rle, height, width)
-                frame_masks[fn].append((mask, categories[category_id], score, category_colors[category_id]))
+        print(f"  Best prediction: {categories[best_pred['category_id']]} (score: {best_pred['score']:.4f})")
         
-        # For each frame, keep only the mask with the highest score
-        for fn in frame_masks:
-            if frame_masks[fn]:
-                # Sort by score (highest first) and keep only the first one
-                frame_masks[fn].sort(key=lambda x: x[2], reverse=True)
-                frame_masks[fn] = [frame_masks[fn][0]]  # Keep only the highest scoring mask
+        # Create frame masks from the best prediction only
+        frame_masks = {fn: [] for fn in file_names}
+        category_id = best_pred["category_id"]
+        segmentations = best_pred["segmentations"]
+        score = best_pred["score"]
+        
+        for idx, rle in enumerate(segmentations):
+            if idx >= len(file_names):
+                continue
+            fn = file_names[idx]
+            mask = decode_rle(rle, height, width)
+            frame_masks[fn].append((mask, categories[category_id], score, category_colors[category_id]))
 
         # Check if any frames have masks (only save videos with predictions)
         has_masks = any(len(masks) > 0 for masks in frame_masks.values())
         if not has_masks:
+            skipped_videos.append((folder_name, "No masks to visualize after processing"))
             print(f"  Skipping video {video_id} - no masks to visualize")
             continue
 
@@ -174,12 +178,57 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
             out.release()
             print(f"  Saved video to {output_video_path}")
 
+    # Track videos with different types of prediction issues
+    videos_with_no_predictions = []
+    videos_below_threshold = []
+    
+    all_video_ids = set(video_info.keys())
+    videos_with_any_predictions = set(all_preds_by_video.keys())
+    videos_with_predictions_above_thresh = set(preds_by_video.keys())
+    
+    # Videos with no predictions at all
+    videos_without_any_predictions = all_video_ids - videos_with_any_predictions
+    
+    # Videos with predictions but none above threshold
+    videos_with_predictions_below_thresh = videos_with_any_predictions - videos_with_predictions_above_thresh
+    
+    for video_id in videos_without_any_predictions:
+        if video_id in video_info:
+            folder_name = os.path.dirname(video_info[video_id]["file_names"][0])
+            videos_with_no_predictions.append((folder_name, "No predictions at all"))
+    
+    for video_id in videos_with_predictions_below_thresh:
+        if video_id in video_info:
+            folder_name = os.path.dirname(video_info[video_id]["file_names"][0])
+            max_score = max(pred["score"] for pred in all_preds_by_video[video_id])
+            videos_below_threshold.append((folder_name, f"No predictions above threshold {score_thresh} (max score: {max_score:.4f})"))
+    
     print(f"\nProcessing complete. Videos saved to: {output_dir}")
+    
+    # Print summary of skipped videos
+    all_skipped = skipped_videos + videos_with_no_predictions + videos_below_threshold
+    if all_skipped:
+        print(f"\n{len(all_skipped)} videos were not saved:")
+        print("-" * 80)
+        for video_name, reason in all_skipped:
+            print(f"  {video_name}: {reason}")
+        print("-" * 80)
+        
+        # Print breakdown
+        print(f"\nBreakdown:")
+        print(f"  Videos with no predictions at all: {len(videos_with_no_predictions)}")
+        print(f"  Videos with predictions below threshold: {len(videos_below_threshold)}")
+        print(f"  Videos with processing issues: {len(skipped_videos)}")
+        print(f"  Total videos in validation set: {len(all_video_ids)}")
+        print(f"  Videos with any predictions: {len(videos_with_any_predictions)}")
+        print(f"  Videos successfully saved: {len(videos_with_any_predictions) - len(videos_below_threshold) - len([v for v in skipped_videos if 'No masks' in v[1]])}")
+    else:
+        print("\nAll videos with predictions were successfully processed and saved.")
 
 if __name__ == "__main__":
-    results_json = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/checkpoint_evaluations/checkpoint_0001655/inference/results.json"
-    valid_json = "/data/fishway_ytvis/val.json"
+    results_json = "/store/simone/dvis-model-outputs/trained_models/model_stride1/checkpoint_evaluations/checkpoint_0002342/inference/results.json"
+    valid_json = "/store/simone/dvis-model-outputs/trained_models/model_stride1/val.json"
     image_root = "/data/fishway_ytvis/all_videos"
-    output_dir = "/store/simone/dvis-model-outputs/trained_models/enhanced_augmentations_0.0001_15f/checkpoint_evaluations/checkpoint_0001655/inference/video_predictions"
+    output_dir = "/store/simone/dvis-model-outputs/trained_models/model_stride1/checkpoint_evaluations/checkpoint_0002342/inference/video_predictions"
 
-    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0.1)
+    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0.05)
