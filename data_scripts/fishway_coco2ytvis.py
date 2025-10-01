@@ -54,7 +54,8 @@ def convert_coco_to_ytvis(
     df = pd.read_csv(metadata_csv_path)
     df = df[
         (df["mask annotated"] == 1) &
-        (df["Mask Annotator Name"].isin(["Simone", "Bushra"]))
+        (df["Mask Annotator Name"].isin(["Simone", "Bushra"])) &
+        (df["Single Fish"] == 1)
     ]
 
     # Step 2: Create output directories
