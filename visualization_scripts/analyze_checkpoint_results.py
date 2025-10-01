@@ -15,7 +15,7 @@ Usage:
     python analyze_checkpoint_results.py --model-dir /path/to/model --run-mask-metrics
     
     # Fast mode for quick analysis
-    python analyze_checkpoint_results.py --model-dir /path/to/model --run-mask-metrics --fast-mode
+    python analyze_checkpoint_results.py --model-dir /path/to/model --run-mask-metrics
     
     # Basic summary only (no advanced analysis)
     python analyze_checkpoint_results.py --model-dir /path/to/model --analysis-level basic
@@ -41,6 +41,8 @@ import time
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Note: Global caching removed due to multiprocessing incompatibility
 
 def find_checkpoint_results(base_dir: str, evaluation_dir: str = None) -> List[str]:
     """
@@ -176,7 +178,7 @@ def detect_stride_and_get_val_json(model_dir: str, default_val_json: str, config
         logger.warning(f"Could not read config file {config_path}: {e}. Using default val.json")
         return default_val_json
 
-def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_threshold: float = 0.0, fast_mode: bool = False, force_recompute: bool = False) -> bool:
+def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_threshold: float = 0.0, force_recompute: bool = False) -> bool:
     """
     Run mask metrics analysis for a single checkpoint.
     
@@ -184,7 +186,6 @@ def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_thr
         checkpoint_dir: Directory containing checkpoint results
         val_json: Path to validation JSON file
         confidence_threshold: Minimum confidence threshold for predictions
-        fast_mode: Run in fast mode (skip expensive operations)
         force_recompute: Force recomputation even if CSV exists
         
     Returns:
@@ -210,42 +211,62 @@ def run_mask_metrics_analysis(checkpoint_dir: str, val_json: str, confidence_thr
     logger.info(f"Running mask metrics analysis for: {os.path.basename(checkpoint_dir)}")
     
     try:
-        # Run the mask metrics script
-        cmd = [
-            "python", "/home/simone/fish-dvis/visualization_scripts/mask_metrics.py",
-            "--results-json", results_json,
-            "--val-json", val_json,
-            "--csv-path", csv_path,
-            "--cm-plot-path", cm_plot_path,
-            "--confidence-threshold", str(confidence_threshold)
-        ]
+        # Import mask_metrics functions directly to avoid subprocess overhead
+        from mask_metrics import main as mask_metrics_main
         
-        if fast_mode:
-            cmd.append("--fast-mode")
+        # Call the main function directly (silent mode for parallel processing)
+        mask_metrics_main(
+            results_json=results_json,
+            val_json=val_json,
+            csv_path=csv_path,
+            cm_plot_path=cm_plot_path,
+            confidence_threshold=confidence_threshold,
+            verbose=False
+        )
         
-        # Set environment variables
-        env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = '0'
-        env['DETECTRON2_DATASETS'] = '/data'
-        env['PYTHONPATH'] = '/home/simone/fish-dvis/DVIS_Plus/DVIS_DAQ'
+        logger.info(f"Mask metrics analysis completed for {os.path.basename(checkpoint_dir)}")
+        return True
         
-        # Run analysis
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
-        
-        if result.returncode == 0:
-            logger.info(f"Mask metrics analysis completed for {os.path.basename(checkpoint_dir)}")
-            return True
-        else:
-            logger.error(f"Mask metrics analysis failed for {os.path.basename(checkpoint_dir)}")
-            logger.error(f"Error: {result.stderr}")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        logger.error(f"Mask metrics analysis timed out for {os.path.basename(checkpoint_dir)}")
-        return False
     except Exception as e:
         logger.error(f"Exception during mask metrics analysis: {e}")
-        return False
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Fallback to subprocess if direct import fails
+        try:
+            logger.info("Falling back to subprocess method...")
+            cmd = [
+                "python", "/home/simone/fish-dvis/visualization_scripts/mask_metrics.py",
+                "--results-json", results_json,
+                "--val-json", val_json,
+                "--csv-path", csv_path,
+                "--cm-plot-path", cm_plot_path,
+                "--confidence-threshold", str(confidence_threshold)
+            ]
+            
+            # Set environment variables
+            env = os.environ.copy()
+            env['CUDA_VISIBLE_DEVICES'] = '0'
+            env['DETECTRON2_DATASETS'] = '/data'
+            env['PYTHONPATH'] = '/home/simone/fish-dvis/DVIS_Plus/DVIS_DAQ'
+            
+            # Run analysis
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
+            
+            if result.returncode == 0:
+                logger.info(f"Mask metrics analysis completed for {os.path.basename(checkpoint_dir)}")
+                return True
+            else:
+                logger.error(f"Mask metrics analysis failed for {os.path.basename(checkpoint_dir)}")
+                logger.error(f"Error: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"Mask metrics analysis timed out for {os.path.basename(checkpoint_dir)}")
+            return False
+        except Exception as e2:
+            logger.error(f"Exception during subprocess fallback: {e2}")
+            return False
 
 def process_checkpoint_wrapper(args_tuple):
     """
@@ -253,16 +274,16 @@ def process_checkpoint_wrapper(args_tuple):
     This function needs to be at module level for pickling.
     
     Args:
-        args_tuple: Tuple of (checkpoint_dir, val_json, confidence_threshold, fast_mode, force_recompute)
+        args_tuple: Tuple of (checkpoint_dir, val_json, confidence_threshold, force_recompute)
         
     Returns:
         Tuple of (checkpoint_dir, success_status)
     """
-    checkpoint_dir, val_json, confidence_threshold, fast_mode, force_recompute = args_tuple
-    return checkpoint_dir, run_mask_metrics_analysis(checkpoint_dir, val_json, confidence_threshold, fast_mode, force_recompute)
+    checkpoint_dir, val_json, confidence_threshold, force_recompute = args_tuple
+    return checkpoint_dir, run_mask_metrics_analysis(checkpoint_dir, val_json, confidence_threshold, force_recompute)
 
 def run_mask_metrics_analysis_parallel(checkpoint_dirs: List[str], val_json: str, confidence_threshold: float = 0.0, 
-                                     fast_mode: bool = False, max_workers: int = None, force_recompute: bool = False) -> Dict[str, bool]:
+                                     max_workers: int = None, force_recompute: bool = False) -> Dict[str, bool]:
     """
     Run mask metrics analysis for multiple checkpoints in parallel.
     
@@ -270,7 +291,6 @@ def run_mask_metrics_analysis_parallel(checkpoint_dirs: List[str], val_json: str
         checkpoint_dirs: List of checkpoint directories to process
         val_json: Path to validation JSON file
         confidence_threshold: Minimum confidence threshold for predictions
-        fast_mode: Run in fast mode (skip expensive operations)
         max_workers: Maximum number of parallel workers (default: CPU count)
         force_recompute: Force recomputation even if CSV exists
         
@@ -278,7 +298,9 @@ def run_mask_metrics_analysis_parallel(checkpoint_dirs: List[str], val_json: str
         Dictionary mapping checkpoint_dir to success status
     """
     if max_workers is None:
-        max_workers = min(max(1, mp.cpu_count() - 2), len(checkpoint_dirs))
+        # Use fewer workers to avoid I/O contention and memory issues
+        # Each process loads large validation JSON and results files
+        max_workers = min(max(1, mp.cpu_count() // 2), len(checkpoint_dirs), 8)
     
     logger.info(f"Running parallel mask metrics analysis with {max_workers} workers...")
     
@@ -299,7 +321,7 @@ def run_mask_metrics_analysis_parallel(checkpoint_dirs: List[str], val_json: str
     
     # Prepare arguments for each checkpoint
     args_list = [
-        (checkpoint_dir, val_json, confidence_threshold, fast_mode, force_recompute)
+        (checkpoint_dir, val_json, confidence_threshold, force_recompute)
         for checkpoint_dir in checkpoints_to_process
     ]
     
@@ -367,6 +389,7 @@ def collect_summary_data(base_dir: str, evaluation_dir: str = None) -> pd.DataFr
         # Try new separate CSV structure first
         dataset_csv_path = os.path.join(checkpoint_dir, "inference", "mask_metrics_dataset.csv")
         frame_csv_path = os.path.join(checkpoint_dir, "inference", "mask_metrics_frame.csv")
+        video_csv_path = os.path.join(checkpoint_dir, "inference", "mask_metrics_video.csv")
         
         # Extract iteration number
         dir_name = os.path.basename(checkpoint_dir)
@@ -393,17 +416,29 @@ def collect_summary_data(base_dir: str, evaluation_dir: str = None) -> pd.DataFr
                     except Exception as e:
                         logger.warning(f"Could not read frame CSV from {checkpoint_dir}: {e}")
                 
-                # Check if this is a fast mode result (only COCO metrics available)
-                is_fast_mode = ('ap10_track' not in metrics_dict and 
-                               'ap_instance_Aweighted' in metrics_dict)
+                # Get per-video metrics from video CSV if available
+                mean_video_ap = None
+                mean_video_ap50 = None
+                if os.path.exists(video_csv_path):
+                    try:
+                        df_video = pd.read_csv(video_csv_path)
+                        if len(df_video) > 0:
+                            # Check if per-video metrics columns exist
+                            if 'video_AP' in df_video.columns:
+                                mean_video_ap = df_video['video_AP'].mean()
+                            if 'video_AP50' in df_video.columns:
+                                mean_video_ap50 = df_video['video_AP50'].mean()
+                    except Exception as e:
+                        logger.warning(f"Could not read video CSV from {checkpoint_dir}: {e}")
                 
-                if is_fast_mode:
-                    logger.info(f"Fast mode data detected for {os.path.basename(checkpoint_dir)} - only COCO metrics available")
+                # Note: All results now use the simplified metrics format
 
                 summary_data.append({
                     'iteration': iteration,
                     'mean_iou': mean_iou,
                     'mean_boundary_f': metrics_dict.get('dataset_boundary_Fmeasure', None),
+                    'mean_video_ap': mean_video_ap,
+                    'mean_video_ap50': mean_video_ap50,
                     'ap10_track': metrics_dict.get('ap10_track', None),
                     'ap25_track': metrics_dict.get('ap25_track', None),
                     'ap50_track': metrics_dict.get('ap50_track', None),
@@ -444,7 +479,6 @@ def collect_summary_data(base_dir: str, evaluation_dir: str = None) -> pd.DataFr
                     'HOTA': metrics_dict.get('HOTA', None),
                     'DetA': metrics_dict.get('DetA', None),
                     'AssA': metrics_dict.get('AssA', None),
-                    'is_fast_mode': is_fast_mode,
                 })
             except Exception as e:
                 logger.warning(f"Could not read dataset CSV from {checkpoint_dir}: {e}")
@@ -463,6 +497,8 @@ def collect_summary_data(base_dir: str, evaluation_dir: str = None) -> pd.DataFr
                             'iteration': iteration,
                             'mean_iou': row.get('dataset_IoU', None),
                             'mean_boundary_f': row.get('dataset_boundary_Fmeasure', None),
+                            'mean_video_ap': row.get('video_AP', None),  # This will be None for old format
+                            'mean_video_ap50': row.get('video_AP50', None),  # This will be None for old format
                             'ap10_track': row.get('ap10_track', None),
                             'ap25_track': row.get('ap25_track', None),
                             'ap50_track': row.get('ap50_track', None),
@@ -559,11 +595,11 @@ def collect_per_species_data(base_dir: str, evaluation_dir: str = None) -> pd.Da
                         'category_name': row.get('category_name'),
                         'iou': None,  # Not available in category CSV
                         'boundary_f': None,  # Not available in category CSV
-                        'ap_10': row.get('ap10_track_per_cat', None),
-                        'ap_25': row.get('ap25_track_per_cat', None),
-                        'ap_50': row.get('ap50_track_per_cat', None),
-                        'ap_75': row.get('ap75_track_per_cat', None),
-                        'ap_95': row.get('ap95_track_per_cat', None),
+                        'ap_10': row.get('ap10_track_per_cat', None),  # Track-level metrics (removed)
+                        'ap_25': row.get('ap25_track_per_cat', None),  # Track-level metrics (removed)
+                        'ap_50': row.get('ap50_track_per_cat', None),  # Track-level metrics (removed)
+                        'ap_75': row.get('ap75_track_per_cat', None),  # Track-level metrics (removed)
+                        'ap_95': row.get('ap95_track_per_cat', None),  # Track-level metrics (removed)
                         # Area-weighted track metrics per species (not available in category CSV)
                         'ap50_track_Aweighted': None,
                         'ap50_track_small': None,
@@ -694,12 +730,12 @@ def create_basic_summary_plot(df_summary: pd.DataFrame, output_dir: str) -> None
         fig_size = (20, 15)
         subplot_shape = (3, 4)
     else:
-        # Fast mode: only COCO instance metrics
+        # Simplified mode: only COCO instance metrics
         metrics = ['ap_instance_Aweighted', 'ap50_instance_Aweighted', 'ap75_instance_Aweighted', 
                    'aps_instance_Aweighted', 'apm_instance_Aweighted', 'apl_instance_Aweighted']
         titles = ['AP (Instance, A-weighted)', 'AP50 (Instance, A-weighted)', 'AP75 (Instance, A-weighted)', 
                   'APs (Instance, A-weighted)', 'APm (Instance, A-weighted)', 'APl (Instance, A-weighted)']
-        fig_title = 'Model Performance Across Checkpoints (COCO Metrics Only - Fast Mode)'
+        fig_title = 'Model Performance Across Checkpoints (COCO Metrics Only)'
         fig_size = (15, 10)
         subplot_shape = (2, 3)
     
@@ -857,12 +893,8 @@ def create_comprehensive_analysis(df_summary: pd.DataFrame, output_dir: str, df_
         logger.warning("No data to analyze")
         return
     
-    # Check if we have mixed fast mode and full mode data
-    has_fast_mode_data = 'is_fast_mode' in df_summary.columns and df_summary['is_fast_mode'].any()
+    # Check if we have track-level data available
     has_track_data = df_summary['ap50_track'].notna().any()
-    
-    if has_fast_mode_data:
-        logger.info("Fast mode data detected - some analyses will be limited to COCO metrics only")
     
     # Create comprehensive plots (adapt based on available data)
     create_performance_plots(df_summary, output_dir)
@@ -898,7 +930,7 @@ def create_comprehensive_analysis(df_summary: pd.DataFrame, output_dir: str, df_
     # Create per-species plots if data is available
     if df_per_species is not None and not df_per_species.empty:
         logger.info("Creating per-species performance plots...")
-        create_per_species_performance_plots(df_per_species, output_dir)
+        # Per-species performance plots removed - not useful metrics
         create_per_category_comparison_plots(df_per_species, output_dir)
     
     # Create AP per category plots for all checkpoints
@@ -933,7 +965,6 @@ def create_performance_plots(df_summary: pd.DataFrame, output_dir: str) -> None:
     """
     # Check what data is available
     has_track_data = 'ap50_track' in df_summary.columns and df_summary['ap50_track'].notna().any()
-    has_fast_mode_data = 'is_fast_mode' in df_summary.columns and df_summary['is_fast_mode'].any()
     
     # Define metrics based on available data
     if has_track_data:
@@ -948,12 +979,12 @@ def create_performance_plots(df_summary: pd.DataFrame, output_dir: str) -> None:
         fig_size = (20, 15)
         subplot_shape = (3, 4)
     else:
-        # Fast mode: only COCO instance metrics
+        # Simplified mode: only COCO instance metrics
         metrics = ['ap_instance_Aweighted', 'ap50_instance_Aweighted', 'ap75_instance_Aweighted', 
                    'aps_instance_Aweighted', 'apm_instance_Aweighted', 'apl_instance_Aweighted']
         titles = ['AP (Instance, A-weighted)', 'AP50 (Instance, A-weighted)', 'AP75 (Instance, A-weighted)', 
                   'APs (Instance, A-weighted)', 'APm (Instance, A-weighted)', 'APl (Instance, A-weighted)']
-        fig_title = 'Model Performance Across Checkpoints (COCO Metrics Only - Fast Mode)'
+        fig_title = 'Model Performance Across Checkpoints (COCO Metrics Only)'
         fig_size = (15, 10)
         subplot_shape = (2, 3)
     
@@ -1219,16 +1250,37 @@ def create_trend_analysis(df_summary: pd.DataFrame, output_dir: str) -> None:
     """
     Create trend analysis plots.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    # Determine which metrics are available
+    available_metrics = []
+    metric_info = [
+        ('ap50_track', 'AP50 (Track)', '#1f77b4'),
+        ('mean_iou', 'Mean IoU', '#ff7f0e'),
+        ('ap50_instance_Aweighted', 'AP50 (Instance, A-weighted)', '#2ca02c'),
+        ('ap_instance_Aweighted', 'AP (Instance, A-weighted)', '#d62728')
+    ]
+    
+    for metric, label, color in metric_info:
+        if metric in df_summary.columns and df_summary[metric].notna().any():
+            available_metrics.append((metric, label, color))
+    
+    if not available_metrics:
+        logger.info("No trend data available - skipping trend analysis")
+        return
+    
+    # Determine number of subplots based on available data
+    has_track_data = 'ap50_track' in df_summary.columns and df_summary['ap50_track'].notna().any()
+    
+    if has_track_data:
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        ax1, ax2 = axes
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+        ax2 = None
+    
     fig.suptitle('Training Progress Analysis', fontsize=16, fontweight='bold')
     
     # Plot 1: Key metrics over time
-    ax1 = axes[0]
-    key_metrics = ['ap50_track', 'mean_iou', 'ap50_instance_Aweighted', 'ap_instance_Aweighted']
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-    labels = ['AP50 (Track)', 'Mean IoU', 'AP50 (Instance, A-weighted)', 'AP (Instance, A-weighted)']
-    
-    for metric, color, label in zip(key_metrics, colors, labels):
+    for metric, label, color in available_metrics:
         valid_data = df_summary[df_summary[metric].notna()]
         if len(valid_data) > 0:
             ax1.plot(valid_data['iteration'], valid_data[metric], 'o-', 
@@ -1240,9 +1292,8 @@ def create_trend_analysis(df_summary: pd.DataFrame, output_dir: str) -> None:
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Performance improvement
-    ax2 = axes[1]
-    if 'ap50_track' in df_summary.columns:
+    # Plot 2: Performance improvement (only if track data available)
+    if ax2 is not None and has_track_data:
         valid_data = df_summary[df_summary['ap50_track'].notna()]
         if len(valid_data) > 1:
             # Calculate improvement from first to last checkpoint
@@ -1365,7 +1416,7 @@ def create_per_species_performance_plots(df_per_species: pd.DataFrame, output_di
     plt.show()
     
     # Create a summary table of best performance per species
-    create_per_species_summary_table(df_per_species, output_dir)
+    # Per-species summary table removed - not useful metrics
     
     logger.info(f"Per-species performance plots saved to: {per_species_plot_path}")
 
@@ -1388,16 +1439,27 @@ def create_per_species_summary_table(df_per_species: pd.DataFrame, output_dir: s
     ax.axis('tight')
     ax.axis('off')
     
-    # Prepare table data
+    # Prepare table data - only show available metrics
     table_data = []
     metrics_to_show = [
-        ('ap_50', 'AP@0.5 (Video)'),
         ('ap50_instance_Aweighted', 'AP50 (Instance, A-weighted)'),
-        ('iou', 'IoU'),
         ('ap_instance_Aweighted', 'AP (Instance, A-weighted)'),
         ('aps_instance_Aweighted', 'APs (Instance, A-weighted)'),
-        ('IDF1', 'IDF1')
+        ('apm_instance_Aweighted', 'APm (Instance, A-weighted)'),
+        ('apl_instance_Aweighted', 'APl (Instance, A-weighted)'),
+        ('ar1_instance', 'AR1 (Instance)'),
+        ('ar10_instance', 'AR10 (Instance)')
     ]
+    
+    # Filter to only show metrics that exist in the data
+    available_metrics = []
+    for metric, label in metrics_to_show:
+        if metric in df_per_species.columns:
+            available_metrics.append((metric, label))
+    
+    if not available_metrics:
+        logger.info("No per-species metrics available - skipping per-species summary table")
+        return
     
     for species in species_list:
         species_data = df_per_species[df_per_species['category_name'] == species]
@@ -1405,7 +1467,7 @@ def create_per_species_summary_table(df_per_species: pd.DataFrame, output_dir: s
             continue
         
         row_data = [species]
-        for metric, metric_name in metrics_to_show:
+        for metric, metric_name in available_metrics:
             if metric in species_data.columns:
                 valid_data = species_data[species_data[metric].notna()]
                 if len(valid_data) > 0:
@@ -1427,7 +1489,7 @@ def create_per_species_summary_table(df_per_species: pd.DataFrame, output_dir: s
         return
     
     # Create table
-    headers = ['Species'] + [metric_name for _, metric_name in metrics_to_show]
+    headers = ['Species'] + [metric_name for _, metric_name in available_metrics]
     table = ax.table(cellText=table_data,
                     colLabels=headers,
                     cellLoc='center',
@@ -1795,10 +1857,9 @@ def create_area_weighted_summary_table(df_summary: pd.DataFrame, output_dir: str
 def create_best_checkpoint_analysis(df_summary: pd.DataFrame, output_dir: str) -> None:
     """
     Create analysis of best performing checkpoints.
-    Adapts to available metrics - prioritizes COCO metrics in fast mode when track metrics are unavailable.
+    Adapts to available metrics - prioritizes COCO metrics when track metrics are unavailable.
     """
-    # Check if we have fast mode data (only COCO metrics available)
-    has_fast_mode_data = 'is_fast_mode' in df_summary.columns and df_summary['is_fast_mode'].any()
+    # Check what data is available
     has_track_data = 'ap50_track' in df_summary.columns and df_summary['ap50_track'].notna().any()
     
     # Define metrics to analyze based on available data
@@ -1811,14 +1872,13 @@ def create_best_checkpoint_analysis(df_summary: pd.DataFrame, output_dir: str) -
         ]
         logger.info("Creating best checkpoint analysis with full metrics (track + instance)")
     else:
-        # Fast mode: prioritize COCO instance metrics
+        # Simplified mode: prioritize COCO instance metrics
         metrics_to_analyze = [
             'ap50_instance_Aweighted', 'ap_instance_Aweighted', 'ap75_instance_Aweighted', 
             'aps_instance_Aweighted', 'apm_instance_Aweighted', 'apl_instance_Aweighted'
         ]
-        logger.info("Creating best checkpoint analysis with COCO metrics only (fast mode detected)")
-        if has_fast_mode_data:
-            logger.info("Note: Track-level metrics not available - analysis limited to instance-level COCO metrics")
+        logger.info("Creating best checkpoint analysis with COCO metrics only")
+        logger.info("Note: Track-level metrics not available - analysis limited to instance-level COCO metrics")
     
     # Find best checkpoints for different metrics
     best_checkpoints = {}
@@ -1889,7 +1949,7 @@ def create_best_checkpoint_analysis(df_summary: pd.DataFrame, output_dir: str) -
                 'aps_instance_Aweighted': 'APs (Instance, A-weighted)',
                 'apm_instance_Aweighted': 'APm (Instance, A-weighted)',
                 'apl_instance_Aweighted': 'APl (Instance, A-weighted)',
-                'ap50_track_per_cat': 'AP50 (Track, Per-cat)',
+                'ap50_track_per_cat': 'AP50 (Track, Per-cat)',  # Track-level metrics (removed)
                 'ap50_instance_per_cat': 'AP50 (Instance, Per-cat)'
             }.get(metric, metric)
             logger.info(f"{metric_name}: Iteration {info['iteration']} (Value: {info['value']:.4f})")
@@ -2452,7 +2512,7 @@ def create_model_performance_report(df_summary: pd.DataFrame, output_dir: str, m
         f.write("-" * 40 + "\n")
         
         # Video and COCO metrics
-        for metric in ['mean_iou', 'ap50_track', 'ap75_track', 'ap50_instance_Aweighted', 'ap_instance_Aweighted', 'ap75_instance_Aweighted', 'aps_instance_Aweighted', 'apm_instance_Aweighted', 'apl_instance_Aweighted', 'ap50_track_per_cat', 'ap50_instance_per_cat']:
+        for metric in ['mean_iou', 'ap50_track', 'ap75_track', 'ap50_instance_Aweighted', 'ap_instance_Aweighted', 'ap75_instance_Aweighted', 'aps_instance_Aweighted', 'apm_instance_Aweighted', 'apl_instance_Aweighted', 'ap50_track_per_cat', 'ap50_instance_per_cat']:  # Note: track-level metrics removed
             if metric in df_summary.columns:
                 valid_data = df_summary[df_summary[metric].notna()]
                 if len(valid_data) > 0:
@@ -2622,9 +2682,17 @@ def create_model_performance_report(df_summary: pd.DataFrame, output_dir: str, m
         f.write("TRAINING DYNAMICS\n")
         f.write("-" * 40 + "\n")
         f.write(f"Stability: {dynamics_analysis['stability']}\n")
-        f.write(f"Early performance: {dynamics_analysis['learning_rate_analysis']['early']:.4f}\n")
-        f.write(f"Mid performance: {dynamics_analysis['learning_rate_analysis']['mid']:.4f}\n")
-        f.write(f"Late performance: {dynamics_analysis['learning_rate_analysis']['late']:.4f}\n")
+        
+        # Handle case where learning_rate_analysis might be empty
+        if 'learning_rate_analysis' in dynamics_analysis and dynamics_analysis['learning_rate_analysis']:
+            lr_analysis = dynamics_analysis['learning_rate_analysis']
+            f.write(f"Early performance: {lr_analysis.get('early', 0.0):.4f}\n")
+            f.write(f"Mid performance: {lr_analysis.get('mid', 0.0):.4f}\n")
+            f.write(f"Late performance: {lr_analysis.get('late', 0.0):.4f}\n")
+        else:
+            f.write("Early performance: N/A (insufficient data)\n")
+            f.write("Mid performance: N/A (insufficient data)\n")
+            f.write("Late performance: N/A (insufficient data)\n")
         
         for rec in dynamics_analysis['recommendations']:
             f.write(f"• {rec}\n")
@@ -2731,11 +2799,10 @@ def create_comprehensive_comparison_plots(df_summary: pd.DataFrame, output_dir: 
     
     # Plot 2: Track vs Instance AP50 (Per-category)
     ax2 = axes[0, 1]
-    if 'ap50_track_per_cat' in df_summary.columns and 'ap50_instance_per_cat' in df_summary.columns:
-        valid_data = df_summary[df_summary['ap50_track_per_cat'].notna() & df_summary['ap50_instance_per_cat'].notna()]
+    # Note: Track-level metrics removed, only instance-level available
+    if 'ap50_instance_per_cat' in df_summary.columns:
+        valid_data = df_summary[df_summary['ap50_instance_per_cat'].notna()]
         if len(valid_data) > 0:
-            ax2.plot(valid_data['iteration'], valid_data['ap50_track_per_cat'], 'o-', 
-                    color='green', linewidth=2, markersize=6, label='AP50 (Track, Per-cat)')
             ax2.plot(valid_data['iteration'], valid_data['ap50_instance_per_cat'], 's-', 
                     color='orange', linewidth=2, markersize=6, label='AP50 (Instance, Per-cat)')
             ax2.set_xlabel('Iteration')
@@ -2896,7 +2963,8 @@ def create_comprehensive_comparison_plots(df_summary: pd.DataFrame, output_dir: 
 
 def create_per_category_comparison_plots(df_per_species: pd.DataFrame, output_dir: str) -> None:
     """
-    Create per-category comparison plots showing track vs instance performance for each species.
+    Create per-category comparison plots showing instance performance for each species.
+    Only shows plots when relevant data is available.
     
     Args:
         df_per_species: DataFrame with per-species metrics
@@ -2912,130 +2980,108 @@ def create_per_category_comparison_plots(df_per_species: pd.DataFrame, output_di
         logger.warning("No species found in data")
         return
     
+    # Check what data is available
+    has_track_data = 'ap_50' in df_per_species.columns and df_per_species['ap_50'].notna().any()
+    has_instance_data = 'ap50_instance_per_cat' in df_per_species.columns and df_per_species['ap50_instance_per_cat'].notna().any()
+    has_area_weighted_data = 'ap50_instance_Aweighted' in df_per_species.columns and df_per_species['ap50_instance_Aweighted'].notna().any()
+    
+    if not has_instance_data:
+        logger.info("No per-category instance data available - skipping per-category comparison plots")
+        return
+    
     # Create color palette for species
     colors = plt.cm.Set3(np.linspace(0, 1, len(species_list)))
     color_dict = dict(zip(species_list, colors))
     
-    # Create comprehensive per-category comparison plots
-    fig, axes = plt.subplots(2, 2, figsize=(20, 15))
-    fig.suptitle('Per-Category Track vs Instance Performance Comparison', fontsize=16, fontweight='bold')
+    # Determine layout based on available data
+    if has_track_data and has_area_weighted_data:
+        # All data available - 2x2 layout
+        fig, axes = plt.subplots(2, 2, figsize=(20, 15))
+        ax1, ax2, ax3, ax4 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
+        title = 'Per-Category Track vs Instance Performance Comparison'
+    elif has_track_data or has_area_weighted_data:
+        # Some data available - 2x1 layout
+        fig, axes = plt.subplots(2, 1, figsize=(15, 12))
+        ax1, ax2 = axes[0], axes[1]
+        ax3, ax4 = None, None
+        title = 'Per-Category Instance Performance Comparison'
+    else:
+        # Only basic instance data - 1x1 layout
+        fig, ax1 = plt.subplots(1, 1, figsize=(12, 8))
+        ax2, ax3, ax4 = None, None, None
+        title = 'Per-Category Instance Performance Comparison'
     
-    # Plot 1: AP50 comparison by species
-    ax1 = axes[0, 0]
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+    
+    # Plot 1: Instance AP50 by species (always show if instance data available)
     for species in species_list:
         species_data = df_per_species[df_per_species['category_name'] == species]
         if len(species_data) > 0:
-            # Track-level AP50
-            if 'ap_50' in species_data.columns:
-                valid_data = species_data[species_data['ap_50'].notna()]
-                if len(valid_data) > 0:
-                    ax1.plot(valid_data['iteration'], valid_data['ap_50'], 'o-', 
-                           color=color_dict[species], linewidth=2, markersize=4, 
-                           label=f'{species} (Track)', alpha=0.8)
-            
             # Instance-level AP50
             if 'ap50_instance_per_cat' in species_data.columns:
                 valid_data = species_data[species_data['ap50_instance_per_cat'].notna()]
                 if len(valid_data) > 0:
-                    ax1.plot(valid_data['iteration'], valid_data['ap50_instance_per_cat'], 's--', 
-                           color=color_dict[species], linewidth=2, markersize=4, 
-                           label=f'{species} (Instance)', alpha=0.8)
-    
-    ax1.set_xlabel('Iteration')
-    ax1.set_ylabel('AP50')
-    ax1.set_title('AP50: Track vs Instance by Species')
-    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-    ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Performance ratio by species
-    ax2 = axes[0, 1]
-    for species in species_list:
-        species_data = df_per_species[df_per_species['category_name'] == species]
-        if len(species_data) > 0 and 'ap_50' in species_data.columns and 'ap50_instance_per_cat' in species_data.columns:
-            valid_data = species_data[species_data['ap_50'].notna() & species_data['ap50_instance_per_cat'].notna()]
-            if len(valid_data) > 0:
-                ratio = valid_data['ap_50'] / valid_data['ap50_instance_per_cat']
-                ratio = ratio.replace([np.inf, -np.inf], np.nan)
-                valid_ratio = ~np.isnan(ratio)
-                if np.any(valid_ratio):
-                    ax2.plot(valid_data['iteration'][valid_ratio], ratio[valid_ratio], 'o-', 
+                    ax1.plot(valid_data['iteration'], valid_data['ap50_instance_per_cat'], 'o-', 
                            color=color_dict[species], linewidth=2, markersize=4, 
                            label=species, alpha=0.8)
     
-    ax2.axhline(y=1, color='black', linestyle='--', alpha=0.5, label='Equal Performance')
-    ax2.set_xlabel('Iteration')
-    ax2.set_ylabel('Ratio (Track/Instance)')
-    ax2.set_title('Performance Ratio: Track vs Instance AP50 by Species')
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-    ax2.grid(True, alpha=0.3)
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('AP50')
+    ax1.set_title('AP50 Instance Performance by Species')
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax1.grid(True, alpha=0.3)
     
-    # Plot 3: Area-weighted comparison by species
-    ax3 = axes[1, 0]
-    for species in species_list:
-        species_data = df_per_species[df_per_species['category_name'] == species]
-        if len(species_data) > 0:
-            # Track-level area-weighted
-            if 'ap50_track_Aweighted' in species_data.columns:
-                valid_data = species_data[species_data['ap50_track_Aweighted'].notna()]
-                if len(valid_data) > 0:
-                    ax3.plot(valid_data['iteration'], valid_data['ap50_track_Aweighted'], 'o-', 
-                           color=color_dict[species], linewidth=2, markersize=4, 
-                           label=f'{species} (Track, A-weighted)', alpha=0.8)
-            
-            # Instance-level area-weighted
-            if 'ap50_instance_Aweighted' in species_data.columns:
-                valid_data = species_data[species_data['ap50_instance_Aweighted'].notna()]
-                if len(valid_data) > 0:
-                    ax3.plot(valid_data['iteration'], valid_data['ap50_instance_Aweighted'], 's--', 
-                           color=color_dict[species], linewidth=2, markersize=4, 
-                           label=f'{species} (Instance, A-weighted)', alpha=0.8)
-    
-    ax3.set_xlabel('Iteration')
-    ax3.set_ylabel('AP50')
-    ax3.set_title('AP50: Track vs Instance (Area-weighted) by Species')
-    ax3.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-    ax3.grid(True, alpha=0.3)
-    
-    # Plot 4: Best performance summary by species
-    ax4 = axes[1, 1]
-    species_summary = []
-    for species in species_list:
-        species_data = df_per_species[df_per_species['category_name'] == species]
-        if len(species_data) > 0:
-            track_best = 0
-            instance_best = 0
-            
-            if 'ap_50' in species_data.columns:
-                valid_data = species_data[species_data['ap_50'].notna()]
-                if len(valid_data) > 0:
-                    track_best = valid_data['ap_50'].max()
-            
-            if 'ap50_instance_per_cat' in species_data.columns:
-                valid_data = species_data[species_data['ap50_instance_per_cat'].notna()]
-                if len(valid_data) > 0:
-                    instance_best = valid_data['ap50_instance_per_cat'].max()
-            
-            if track_best > 0 or instance_best > 0:
-                species_summary.append((species, track_best, instance_best))
-    
-    if species_summary:
-        species_names = [s[0] for s in species_summary]
-        track_scores = [s[1] for s in species_summary]
-        instance_scores = [s[2] for s in species_summary]
+    # Plot 2: Area-weighted instance performance (only if available)
+    if ax2 is not None and has_area_weighted_data:
+        for species in species_list:
+            species_data = df_per_species[df_per_species['category_name'] == species]
+            if len(species_data) > 0:
+                # Instance-level area-weighted
+                if 'ap50_instance_Aweighted' in species_data.columns:
+                    valid_data = species_data[species_data['ap50_instance_Aweighted'].notna()]
+                    if len(valid_data) > 0:
+                        ax2.plot(valid_data['iteration'], valid_data['ap50_instance_Aweighted'], 's--', 
+                               color=color_dict[species], linewidth=2, markersize=4, 
+                               label=species, alpha=0.8)
         
-        x = np.arange(len(species_names))
-        width = 0.35
+        ax2.set_xlabel('Iteration')
+        ax2.set_ylabel('AP50')
+        ax2.set_title('AP50 Instance Performance (Area-weighted) by Species')
+        ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Best performance summary by species (only instance data)
+    if ax3 is not None:
+        species_summary = []
+        for species in species_list:
+            species_data = df_per_species[df_per_species['category_name'] == species]
+            if len(species_data) > 0:
+                instance_best = 0
+                
+                if 'ap50_instance_per_cat' in species_data.columns:
+                    valid_data = species_data[species_data['ap50_instance_per_cat'].notna()]
+                    if len(valid_data) > 0:
+                        instance_best = valid_data['ap50_instance_per_cat'].max()
+                
+                if instance_best > 0:
+                    species_summary.append((species, instance_best))
         
-        ax4.bar(x - width/2, track_scores, width, label='Track AP50 (Best)', alpha=0.8)
-        ax4.bar(x + width/2, instance_scores, width, label='Instance AP50 (Best)', alpha=0.8)
-        
-        ax4.set_xlabel('Species')
-        ax4.set_ylabel('AP50')
-        ax4.set_title('Best AP50 Performance by Species')
-        ax4.set_xticks(x)
-        ax4.set_xticklabels(species_names, rotation=45, ha='right')
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
+        if species_summary:
+            species_names = [s[0] for s in species_summary]
+            instance_scores = [s[1] for s in species_summary]
+            
+            x = np.arange(len(species_names))
+            width = 0.5
+            
+            ax3.bar(x, instance_scores, width, label='Instance AP50 (Best)', alpha=0.8, color='steelblue')
+            
+            ax3.set_xlabel('Species')
+            ax3.set_ylabel('AP50')
+            ax3.set_title('Best Instance AP50 Performance by Species')
+            ax3.set_xticks(x)
+            ax3.set_xticklabels(species_names, rotation=45, ha='right')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
     per_category_plot_path = os.path.join(output_dir, 'per_category_comparison.png')
@@ -3060,12 +3106,17 @@ def plot_ap_per_category_from_csv(csv_path: str, output_path: str = "AP_per_cate
         df = pd.read_csv(csv_path)
         
         # Use the new column names that match the renamed metrics
-        ap_columns = ["ap10_track_per_cat", "ap25_track_per_cat", "ap50_track_per_cat", "ap75_track_per_cat", "ap95_track_per_cat"]
+        # Look for instance-level AP columns (new format)
+        ap_columns = ["ap_instance_per_cat", "ap50_instance_per_cat", "ap75_instance_per_cat"]
         
         # Check which columns actually exist in the CSV
         available_columns = [col for col in ap_columns if col in df.columns]
         if not available_columns:
-            # Fallback to old column names if new ones don't exist
+            # Fallback to old track-level column names if new ones don't exist
+            ap_columns = ["ap10_track_per_cat", "ap25_track_per_cat", "ap50_track_per_cat", "ap75_track_per_cat", "ap95_track_per_cat"]
+            available_columns = [col for col in ap_columns if col in df.columns]
+        if not available_columns:
+            # Fallback to even older column names
             ap_columns = ["AP@0.1", "AP@0.25", "AP@0.5", "AP@0.75", "AP@0.95"]
             available_columns = [col for col in ap_columns if col in df.columns]
         
@@ -3105,7 +3156,10 @@ def plot_ap_per_category_from_csv(csv_path: str, output_path: str = "AP_per_cate
 
 def create_per_category_summary_table(df_per_species: pd.DataFrame, output_dir: str) -> None:
     """
-    Create a comprehensive summary table for per-category metrics.
+    Create a summary table showing AP50_instance metrics per category.
+    Shows two columns:
+    1. Best per-category AP50_instance across all checkpoints (each species can have different best checkpoint)
+    2. Per-category AP50_instance values for the best overall checkpoint (same checkpoint for all species)
     
     Args:
         df_per_species: DataFrame with per-species metrics
@@ -3114,50 +3168,92 @@ def create_per_category_summary_table(df_per_species: pd.DataFrame, output_dir: 
     if df_per_species.empty:
         return
     
+    # Check if we have the required metric
+    if 'ap50_instance_per_cat' not in df_per_species.columns:
+        logger.info("No per-category AP50_instance metrics available - skipping per-category summary table")
+        return
+    
     # Get unique species
     species_list = df_per_species['category_name'].unique()
     
     # Create summary table
-    fig, ax = plt.subplots(figsize=(16, len(species_list) * 0.4 + 2))
+    fig, ax = plt.subplots(figsize=(12, len(species_list) * 0.4 + 2))
     ax.axis('tight')
     ax.axis('off')
     
     # Prepare table data
     table_data = []
-    metrics_to_show = [
-        ('ap_50', 'AP50 (Track)'),
-        ('ap50_instance_per_cat', 'AP50 (Instance)'),
-        ('ap50_track_Aweighted', 'AP50 (Track, A-weighted)'),
-        ('ap50_instance_Aweighted', 'AP50 (Instance, A-weighted)'),
-        ('MOTA', 'MOTA'),
-        ('IDF1', 'IDF1'),
-        ('track_completeness', 'Track Completeness'),
-        ('temporal_iou_stability', 'Temporal IoU Stability')
-    ]
+    
+    # Find the best overall checkpoint (highest average AP50_instance_per_cat across all species)
+    overall_best_checkpoint = None
+    best_overall_score = -1
     
     for species in species_list:
         species_data = df_per_species[df_per_species['category_name'] == species]
         if len(species_data) == 0:
             continue
         
+        valid_data = species_data[species_data['ap50_instance_per_cat'].notna()]
+        if len(valid_data) > 0:
+            # Find best checkpoint for this species
+            best_idx = valid_data['ap50_instance_per_cat'].idxmax()
+            best_value = valid_data.loc[best_idx, 'ap50_instance_per_cat']
+            best_iter = valid_data.loc[best_idx, 'iteration']
+            
+            # Check if this checkpoint gives the best overall score
+            checkpoint_data = df_per_species[df_per_species['iteration'] == best_iter]
+            checkpoint_scores = checkpoint_data[checkpoint_data['ap50_instance_per_cat'].notna()]['ap50_instance_per_cat']
+            if len(checkpoint_scores) > 0:
+                avg_score = checkpoint_scores.mean()
+                if avg_score > best_overall_score:
+                    best_overall_score = avg_score
+                    overall_best_checkpoint = best_iter
+    
+    # If no overall best checkpoint found, use the checkpoint with highest individual score
+    if overall_best_checkpoint is None:
+        all_valid_data = df_per_species[df_per_species['ap50_instance_per_cat'].notna()]
+        if len(all_valid_data) > 0:
+            best_idx = all_valid_data['ap50_instance_per_cat'].idxmax()
+            overall_best_checkpoint = all_valid_data.loc[best_idx, 'iteration']
+    
+    # Build table data
+    for species in species_list:
+        species_data = df_per_species[df_per_species['category_name'] == species]
+        if len(species_data) == 0:
+            continue
+        
         row_data = [species]
-        for metric, metric_name in metrics_to_show:
-            if metric in species_data.columns:
-                valid_data = species_data[species_data[metric].notna()]
-                if len(valid_data) > 0:
-                    best_idx = valid_data[metric].idxmax()
-                    best_value = valid_data.loc[best_idx, metric]
-                    best_iter = valid_data.loc[best_idx, 'iteration']
-                    row_data.append(f"{best_value:.3f} ({best_iter:.0f})")
-                else:
-                    row_data.append("N/A")
+        
+        # Column 1: Best per-category AP50_instance across all checkpoints
+        valid_data = species_data[species_data['ap50_instance_per_cat'].notna()]
+        if len(valid_data) > 0:
+            best_idx = valid_data['ap50_instance_per_cat'].idxmax()
+            best_value = valid_data.loc[best_idx, 'ap50_instance_per_cat']
+            best_iter = valid_data.loc[best_idx, 'iteration']
+            row_data.append(f"{best_value:.3f} ({best_iter:.0f})")
+        else:
+            row_data.append("N/A")
+        
+        # Column 2: Per-category AP50_instance for best overall checkpoint
+        if overall_best_checkpoint is not None:
+            checkpoint_data = species_data[species_data['iteration'] == overall_best_checkpoint]
+            if len(checkpoint_data) > 0 and checkpoint_data['ap50_instance_per_cat'].notna().any():
+                checkpoint_value = checkpoint_data['ap50_instance_per_cat'].iloc[0]
+                row_data.append(f"{checkpoint_value:.3f} ({overall_best_checkpoint:.0f})")
             else:
                 row_data.append("N/A")
+        else:
+            row_data.append("N/A")
         
         table_data.append(row_data)
     
+    if not table_data:
+        logger.info("No per-category data available for summary table")
+        plt.close(fig)
+        return
+    
     # Create table
-    headers = ['Species'] + [metric_name for _, metric_name in metrics_to_show]
+    headers = ['Species', 'Best Per-Category AP50', 'AP50 at Best Overall Checkpoint']
     table = ax.table(cellText=table_data,
                     colLabels=headers,
                     cellLoc='center',
@@ -3173,20 +3269,21 @@ def create_per_category_summary_table(df_per_species: pd.DataFrame, output_dir: 
         table[(0, i)].set_facecolor('#4CAF50')
         table[(0, i)].set_text_props(weight='bold', color='white')
     
-    plt.title('Per-Category Performance Summary (Best Value at Best Iteration)', fontsize=14, fontweight='bold')
+    plt.title('Per-Category AP50 Instance Metrics Summary', fontsize=14, fontweight='bold')
     plt.tight_layout()
     
-    summary_table_path = os.path.join(output_dir, 'per_category_summary_table.png')
-    plt.savefig(summary_table_path, dpi=300, bbox_inches='tight')
+    # Save table
+    per_category_table_path = os.path.join(output_dir, 'per_category_summary_table.png')
+    plt.savefig(per_category_table_path, dpi=300, bbox_inches='tight')
     plt.show()
     
-    # Also save as CSV
-    summary_csv_path = os.path.join(output_dir, 'per_category_summary.csv')
-    summary_df = pd.DataFrame(table_data, columns=headers)
-    summary_df.to_csv(summary_csv_path, index=False)
+    # Save CSV
+    per_category_csv_path = os.path.join(output_dir, 'per_category_summary.csv')
+    df_table = pd.DataFrame(table_data, columns=headers)
+    df_table.to_csv(per_category_csv_path, index=False)
     
-    logger.info(f"Per-category summary table saved to: {summary_table_path}")
-    logger.info(f"Per-category summary CSV saved to: {summary_csv_path}")
+    logger.info(f"Per-category summary table saved to: {per_category_table_path}")
+    logger.info(f"Per-category summary CSV saved to: {per_category_csv_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='Comprehensive checkpoint analysis')
@@ -3204,8 +3301,6 @@ def main():
                        help='Skip mask metrics analysis and only create plots from existing data')
     parser.add_argument('--confidence-threshold', type=float, default=0.0,
                        help='Confidence threshold for filtering predictions (default: 0.0 = no threshold)')
-    parser.add_argument('--fast-mode', action='store_true',
-                       help='Run in fast mode (skip expensive operations)')
     parser.add_argument('--analysis-level', choices=['basic', 'comprehensive'], default='comprehensive',
                        help='Level of analysis to perform')
     parser.add_argument('--parallel', action='store_true',
@@ -3216,11 +3311,15 @@ def main():
     args = parser.parse_args()
     
     # Set default val.json to model directory if not provided
+    # Handle val.json path
     if args.val_json is None:
-        args.val_json = os.path.join(args.model_dir, 'val.json')
-    
-    # Detect stride and get appropriate val.json file
-    actual_val_json = detect_stride_and_get_val_json(args.model_dir, args.val_json, args.config_file)
+        # No val.json specified, use automatic detection based on config
+        default_val_json = os.path.join(args.model_dir, 'val.json')
+        actual_val_json = detect_stride_and_get_val_json(args.model_dir, default_val_json, args.config_file)
+    else:
+        # User explicitly specified val.json, use it directly
+        actual_val_json = args.val_json
+        logger.info(f"Using user-specified val.json: {actual_val_json}")
     
     # Find all checkpoint result directories
     checkpoint_dirs = find_checkpoint_results(args.model_dir, args.evaluation_dir)
@@ -3258,7 +3357,6 @@ def main():
                 checkpoint_dirs, 
                 actual_val_json, 
                 args.confidence_threshold, 
-                args.fast_mode, 
                 args.max_workers, 
                 args.run_mask_metrics
             )
@@ -3270,7 +3368,7 @@ def main():
             for i, checkpoint_dir in enumerate(checkpoint_dirs):
                 logger.info(f"Processing {i+1}/{len(checkpoint_dirs)}: {os.path.basename(checkpoint_dir)}")
                 
-                success = run_mask_metrics_analysis(checkpoint_dir, actual_val_json, args.confidence_threshold, args.fast_mode, args.run_mask_metrics)
+                success = run_mask_metrics_analysis(checkpoint_dir, actual_val_json, args.confidence_threshold, args.run_mask_metrics)
                 if success:
                     successful_analyses += 1
         

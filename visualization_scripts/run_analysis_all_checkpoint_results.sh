@@ -17,11 +17,8 @@ show_usage() {
     echo "  # Force recompute all mask metrics"
     echo "  $0 /path/to/model --run-mask-metrics"
     echo ""
-    echo "  # Fast mode for quick analysis"
-    echo "  $0 /path/to/model --fast-mode"
-    echo ""
-    echo "  # Ultra-fast mode (fast + confidence threshold)"
-    echo "  $0 /path/to/model --fast-mode --confidence-threshold 0.05"
+    echo "  # Quick analysis with confidence threshold"
+    echo "  $0 /path/to/model --confidence-threshold 0.05"
     echo ""
     echo "  # Parallel processing (much faster for many checkpoints)"
     echo "  $0 /path/to/model --parallel"
@@ -29,8 +26,8 @@ show_usage() {
     echo "  # Parallel processing with specific number of workers"
     echo "  $0 /path/to/model --parallel --max-workers 6"
     echo ""
-    echo "  # Fast mode + parallel processing"
-    echo "  $0 /path/to/model --fast-mode --parallel"
+    echo "  # Quick analysis + parallel processing"
+    echo "  $0 /path/to/model --confidence-threshold 0.05 --parallel"
     echo ""
     echo "  # Basic summary only"
     echo "  $0 /path/to/model --analysis-level basic"
@@ -50,7 +47,6 @@ show_usage() {
     echo "Options:"
     echo "  --run-mask-metrics     Force recompute all mask metrics (overwrites existing)"
     echo "  --skip-mask-metrics    Skip mask metrics analysis (use existing data only)"
-    echo "  --fast-mode            Run in fast mode (skip expensive operations)"
     echo "  --parallel             Run mask metrics analysis in parallel (much faster)"
     echo "  --max-workers          Maximum number of parallel workers (default: CPU count - 2)"
     echo "  --analysis-level       Level of analysis (basic or comprehensive)"
@@ -166,7 +162,7 @@ while [[ $# -gt 0 ]]; do
         *)
             # Only pass arguments that the Python script understands
             case $1 in
-                --run-mask-metrics|--skip-mask-metrics|--fast-mode|--parallel|--analysis-level|--confidence-threshold|--val-json|--max-workers)
+                --run-mask-metrics|--skip-mask-metrics|--parallel|--analysis-level|--confidence-threshold|--val-json|--max-workers)
                     ADDITIONAL_ARGS+=("$1")
                     if [[ $1 == --analysis-level || $1 == --confidence-threshold || $1 == --val-json || $1 == --max-workers ]]; then
                         ADDITIONAL_ARGS+=("$2")
