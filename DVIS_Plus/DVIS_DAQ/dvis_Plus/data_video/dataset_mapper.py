@@ -157,7 +157,6 @@ class YTVISDatasetMapper:
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
         sampling_frame_stride: int = 1,
-        test_sampling_frame_stride: int = 1,
     ):
         """
         NOTE: this interface is experimental.
@@ -180,7 +179,6 @@ class YTVISDatasetMapper:
         self.sampling_frame_ratio = 1.0
         self.reverse_agu = reverse_agu
         self.sampling_frame_stride   = sampling_frame_stride
-        self.test_sampling_frame_stride = test_sampling_frame_stride
 
         if not is_tgt:
             self.src_metadata = MetadataCatalog.get(src_dataset_name)
@@ -219,7 +217,6 @@ class YTVISDatasetMapper:
         sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
         reverse_agu = cfg.INPUT.REVERSE_AGU
         sampling_frame_stride = cfg.INPUT.SAMPLING_FRAME_STRIDE
-        test_sampling_frame_stride = getattr(cfg.INPUT, 'TEST_SAMPLING_FRAME_STRIDE', sampling_frame_stride)
 
         ret = {
             "is_train": is_train,
@@ -234,7 +231,6 @@ class YTVISDatasetMapper:
             "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
             "tgt_dataset_name": cfg.DATASETS.TRAIN[-1],
             "sampling_frame_stride": sampling_frame_stride,
-            "test_sampling_frame_stride": test_sampling_frame_stride,
         }
 
         return ret
@@ -311,7 +307,7 @@ class YTVISDatasetMapper:
             if self.sampling_frame_shuffle:
                 random.shuffle(selected_idx)
         else:
-            selected_idx = range(0, video_length, self.test_sampling_frame_stride)
+            selected_idx = range(video_length)
 
         video_annos = dataset_dict.pop("annotations", None)
         file_names = dataset_dict.pop("file_names", None)

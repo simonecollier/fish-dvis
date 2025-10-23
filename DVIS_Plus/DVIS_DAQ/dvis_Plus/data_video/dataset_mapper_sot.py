@@ -135,8 +135,7 @@ class SOTDatasetMapper:
         num_classes: int = 40,
         cfg=None,
         test_categories=None,
-        multidataset=False,
-        test_sampling_frame_stride: int = 1
+        multidataset=False
     ):
         """
         NOTE: this interface is experimental.
@@ -165,7 +164,6 @@ class SOTDatasetMapper:
         self.sampling_interval = sampling_interval
         self.sampling_frame_shuffle = sampling_frame_shuffle
         self.num_classes = num_classes
-        self.test_sampling_frame_stride = test_sampling_frame_stride
         # fmt: on
         logger = logging.getLogger(__name__)
         mode = "training" if is_train else "inference"
@@ -180,7 +178,6 @@ class SOTDatasetMapper:
         sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
         sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
         sampling_interval = 1
-        test_sampling_frame_stride = getattr(cfg.INPUT, 'TEST_SAMPLING_FRAME_STRIDE', 1)
 
         ret = {
             "is_train": is_train,
@@ -195,8 +192,7 @@ class SOTDatasetMapper:
             "num_classes": 1,
             "cfg": cfg,
             "test_categories": test_categories,
-            "multidataset": multidataset,
-            "test_sampling_frame_stride": test_sampling_frame_stride
+            "multidataset": multidataset
         }
 
         return ret
@@ -230,7 +226,7 @@ class SOTDatasetMapper:
             if self.sampling_frame_shuffle:
                 random.shuffle(selected_idx)
         else:
-            selected_idx = range(0, video_length, self.test_sampling_frame_stride)
+            selected_idx = range(video_length)
         # selected_idx is a List of length self.sampling_frame_num
         video_annos = dataset_dict.pop("annotations", None)  # List
         file_names = dataset_dict.pop("file_names", None)  # List
