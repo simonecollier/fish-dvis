@@ -552,7 +552,7 @@ class DVIS_DAQ_online(MinVIS):
                 if ins_seq.sT + len(ins_seq.pred_masks) < video_start_idx + num_frames:
                     continue
             full_masks = torch.ones(num_frames, H, W).to(torch.float32).to(to_store) * -1e4
-            full_logits = torch.ones(num_frames, self.sem_seg_head.num_classes + 1, dtype=torch.float32, device=self.device) * -1e4
+            full_logits = torch.ones(num_frames, self.sem_seg_head.num_classes + 1).to(torch.float32).to("cuda") * -1e4
             full_logits[:, -1] = 1.
             padding_mask = torch.ones(size=(num_frames, )) > 0
             seq_logits = []
@@ -1315,19 +1315,19 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
             online_logits = torch.zeros(size=(1, 0, pred_logits.shape[-1])).to(pred_logits)
             online_masks = torch.zeros(size=(1, 0, T, H, W)).to(pred_masks)
             trc_queries = torch.zeros(size=(1, 0, T, C)).to(pred_logits)
-            padding_masks = torch.zeros(size=(1, 0, T), dtype=torch.bool, device=self.device)
-            seq_id_tensor = torch.tensor([], dtype=torch.int32, device=self.device)
+            padding_masks = torch.zeros(size=(1, 0, T), dtype=torch.bool).to("cuda")
+            seq_id_tensor = torch.IntTensor([]).to("cuda")
         else:
             online_logits = torch.stack(logits_list).unsqueeze(0)  # b, q, k+1
             online_masks = torch.stack(masks_list).unsqueeze(0)  # b, q, t, h, w
             trc_queries = torch.stack(trc_queries_list).unsqueeze(0)  # b, q, t, c
             padding_masks = torch.stack(padding_mask_list).unsqueeze(0)  # b, q, t
-            seq_id_tensor = torch.tensor(seq_id_list, dtype=torch.int32, device=self.device)
+            seq_id_tensor = torch.IntTensor(seq_id_list).to("cuda")
 
         # topk video thing-instance sequence
         scores = torch.max(F.softmax(online_logits[0, :, :], dim=-1)[:, :-1], dim=-1)[0]
         if self.offline_topk_ins > scores.shape[0]:
-            topk_indices = torch.arange(scores.shape[0], device=self.device)
+            topk_indices = torch.arange(scores.shape[0]).to("cuda")
         else:
             _, topk_indices = scores.topk(self.offline_topk_ins, sorted=False)
         online_logits = online_logits[:, topk_indices, :]
@@ -1346,7 +1346,7 @@ class DVIS_DAQ_offline(DVIS_DAQ_online):
             online_masks = torch.cat([online_masks, naive_link_out["pred_masks"][:, topk_indices.to(to_store), ...]],
                                      dim=1)
             trc_queries = torch.cat([trc_queries, naive_link_out["pred_embds"][:, topk_indices, ...]], dim=1)
-            naive_padding_masks = torch.ones(size=(num_left, num_frames), device=self.device) < 0
+            naive_padding_masks = torch.ones(size=(num_left, num_frames)).to("cuda") < 0
             padding_masks = torch.cat([padding_masks, naive_padding_masks.unsqueeze(0)], dim=1)
             for ii in range(1, num_left + 1):
                 seq_id_list.append((10000 + video_start_idx) * 10000 + ii * 1000)

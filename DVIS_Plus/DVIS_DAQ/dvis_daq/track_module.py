@@ -230,10 +230,6 @@ class VideoInstanceCutter(nn.Module):
 
         self.point_seq_id = None
 
-    @property
-    def device(self):
-        """Get the device of the model parameters for consistent device handling"""
-        return next(self.parameters()).device
 
     def _clear_memory(self):
         del self.video_ins_hub
@@ -266,7 +262,7 @@ class VideoInstanceCutter(nn.Module):
             if len(out_embeds):
                 return torch.stack(out_embeds, dim=0).unsqueeze(1)  # q, 1, c
             else:
-                return torch.empty(size=(0, 1, self.hidden_dim), dtype=torch.float32, device=self.device)
+                return torch.empty(size=(0, 1, self.hidden_dim), dtype=torch.float32).to("cuda")
         elif read_type == "last_pos":
             out_pos_embeds = []
             for seq_id in self.last_seq_ids:
@@ -274,7 +270,7 @@ class VideoInstanceCutter(nn.Module):
             if len(out_pos_embeds):
                 return torch.stack(out_pos_embeds, dim=0).unsqueeze(1)  # q, 1, c
             else:
-                return torch.empty(size=(0, 1, self.hidden_dim), dtype=torch.float32, device=self.device)
+                return torch.empty(size=(0, 1, self.hidden_dim), dtype=torch.float32).to("cuda")
         elif read_type == "gt_ids":
             out_ids = []
             for seq_id in self.last_seq_ids:
@@ -282,13 +278,13 @@ class VideoInstanceCutter(nn.Module):
             if len(out_ids):
                 return torch.stack(out_ids, dim=0)
             else:
-                return torch.empty(size=(0, ), dtype=torch.int64, device=self.device)
+                return torch.empty(size=(0, ), dtype=torch.int64).to("cuda")
         else:
             raise NotImplementedError
 
     def modeling_disappear(self, frames_info, frame_idx, stage=2):
         fQ = len(frames_info["aux_indices"][frame_idx][0][1])
-        disappear_fq_mask = torch.zeros(size=(fQ, ), dtype=torch.bool, device=self.device)
+        disappear_fq_mask = torch.zeros(size=(fQ, ), dtype=torch.bool).to("cuda")
         if self.prev_frame_indices is not None and len(self.prev_frame_indices[0]) > 3:
             select_idx = random.randrange(0, len(self.prev_frame_indices[0]))
             select_tgt_id = self.prev_frame_indices[1][select_idx]
@@ -411,12 +407,12 @@ class VideoInstanceCutter(nn.Module):
 
             if stage == 1:
                 tgt_ids_for_each_query = torch.full(size=(ms_outputs.shape[1],), dtype=torch.int64,
-                                                    fill_value=-1, device=self.device)
+                                                    fill_value=-1).to("cuda")
                 tgt_ids_for_each_query[indices[0][0]] = indices[0][1]
-                activated_queries_bool = torch.ones(size=(ms_outputs.shape[1], ), device=self.device) < 0
+                activated_queries_bool = torch.ones(size=(ms_outputs.shape[1], )).to("cuda") < 0
             elif stage == 2:
                 tgt_ids_for_each_query = torch.full(size=(ms_outputs.shape[1],), dtype=torch.int64,
-                                                    fill_value=-1, device=self.device)
+                                                    fill_value=-1).to("cuda")
                 tgt_ids_for_each_query[indices[0][0]] = indices[0][1]
 
                 pred_scores = torch.max(ms_outputs_class[-1, 0].softmax(-1)[:, :-1], dim=-1)[0]
@@ -424,12 +420,12 @@ class VideoInstanceCutter(nn.Module):
                 sorted_idx = torch.argsort(pred_scores, 0)
                 kick_out_src_indices = indices[0][0][sorted_idx[:len(pred_scores)//2]]
 
-                activated_queries_bool = torch.ones(size=(ms_outputs.shape[1], ), device=self.device) < 0
+                activated_queries_bool = torch.ones(size=(ms_outputs.shape[1], )).to("cuda") < 0
                 activated_queries_bool[indices[0][0]] = True
                 activated_queries_bool[kick_out_src_indices] = False
             elif stage == 3:
                 tgt_ids_for_each_query = torch.full(size=(ms_outputs.shape[1],), dtype=torch.int64,
-                                                    fill_value=-1, device=self.device)
+                                                    fill_value=-1).to("cuda")
                 tgt_ids_for_each_query[indices[0][0]] = indices[0][1]
 
                 pred_scores = torch.max(ms_outputs_class[-1, 0].softmax(-1)[:, :-1], dim=-1)[0]
@@ -767,7 +763,7 @@ class VideoInstanceCutter(nn.Module):
         least_cost_indices = torch.min(C, dim=1)[1]  # q',
 
         indices = linear_sum_assignment(C.cpu())
-        least_cost_indices[indices[0]] = torch.as_tensor(indices[1], dtype=torch.int64, device=self.device)
+        least_cost_indices[indices[0]] = torch.as_tensor(indices[1], dtype=torch.int64).to("cuda")
         return least_cost_indices
 
     def prediction(self, outputs, mask_features):
@@ -792,7 +788,7 @@ class VideoInstanceCutter(nn.Module):
             start = i * 50
             end = start + 50 if start + 50 < mask.shape[1] else mask.shape[1]
 
-            seg_mask = (mask[:, start:end, :, :].sigmoid() > 0.5).to(self.device)
+            seg_mask = (mask[:, start:end, :, :].sigmoid() > 0.5).to("cuda")
             mask_feats = seg_mask[:, :, None, :, :] * mask_features[:, None, ...]  # b, q, c, h, w
             pos_embeds = torch.sum(mask_feats.flatten(3, 4), dim=-1) / (
                     torch.sum(seg_mask.flatten(2, 3), dim=-1, keepdim=True) + 1e-8)
