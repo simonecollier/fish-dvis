@@ -1,8 +1,10 @@
 #!/bin/bash
 source /home/simone/.venv/bin/activate
 export DETECTRON2_DATASETS=/data
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0 
 export PYTHONPATH=/home/simone/fish-dvis/DVIS_Plus/DVIS_DAQ
+export LD_LIBRARY_PATH=/home/simone/.venv/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH
+export PYTHONWARNINGS="ignore::FutureWarning"
 
 # Config file path
 CONFIG_FILE="/home/simone/fish-dvis/configs/DAQ_Fishway_config.yaml"
@@ -32,8 +34,9 @@ cp "/data/fishway_ytvis/val.json" "$OUTPUT_DIR/"
 echo "Files copied to: $OUTPUT_DIR"
 echo "Starting training..."
 
-# To enable debug prints, add --debug to the command line
-CUDA_VISIBLE_DEVICES=0 python /home/simone/fish-dvis/training_scripts/train_net_video.py \
+# Run training with specified device and debug settings
+echo "Starting training with device $DEVICE..."
+python /home/simone/fish-dvis/training_scripts/train_net_video.py \
   --num-gpus 1 \
   --config-file "$CONFIG_FILE" \
   --resume \
