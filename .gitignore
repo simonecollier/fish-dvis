@@ -1,2 +1,5 @@
 dvis-model-outputs
 __pycache__/
+DVIS_Plus/DVIS_Plus/mask2former/modeling/pixel_decoder/ops/build/lib.linux-x86_64-cpython-312/MultiScaleDeformableAttention.cpython-312-x86_64-linux-gnu.so
+DVIS_Plus/DVIS_Plus/mask2former/modeling/pixel_decoder/ops/MultiScaleDeformableAttention.egg-info/
+DVIS_Plus/DVIS_Plus/mask2former/modeling/pixel_decoder/ops/build/
