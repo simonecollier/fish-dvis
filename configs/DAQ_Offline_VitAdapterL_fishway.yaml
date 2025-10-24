@@ -11,25 +11,25 @@ MODEL:
     FREEZE_VIT: True  # choose to freeze the main ViT backbone (trains only the adapter)
     FINETUNE_INDEXES: [2, 3]   # Fine-tuning the last two stages (12 blocks) for better adaptation.
   SEM_SEG_HEAD:
-    NUM_CLASSES: 4 
+    NUM_CLASSES: 5 
   #   IGNORE_VALUE: 255   # pixels labeled 255 are ignored during loss computation
   #   LOSS_WEIGHT: 1.0  # weight for the segmentation loss
   #   NORM: "GN"  # normalization type for the segmentation head (GN = group normalization)
   #   CONVS_DIM: 256  # dimension of the convolutional layers (number of channels) in the segmentation head
   #   MASK_DIM: 256  # number of channels in the mask prediction head
   #   PIXEL_DECODER_NAME: "MSDeformAttnPixelDecoder"
-  # MASK_FORMER:
-  #   NUM_OBJECT_QUERIES: 200 # max instances per frame
-  #   CLASS_WEIGHT: 2.0  # weight for the classification loss
-  #   MASK_WEIGHT: 5.0  # weight for the mask loss
-  #   DICE_WEIGHT: 5.0  # weight for the dice loss
-    # TEST:
-    #   TASK: 'vis'  # video instance segmentation task
-    #   WINDOW_INFERENCE: True  # run inference on small frame windows for memory savings
-    #   WINDOW_SIZE: 3  # size of the window for inference
-    #   MAX_NUM: 3   # limits how many instances are predicted per frame
-  # VIDEO_HEAD:
-  #   NUM_NEW_INS: 200  # maximum number of new instances to consider per frame
+  MASK_FORMER:
+#    NUM_OBJECT_QUERIES: 200 # max instances per frame
+#    CLASS_WEIGHT: 2.0  # weight for the classification loss
+#    MASK_WEIGHT: 5.0  # weight for the mask loss
+#    DICE_WEIGHT: 5.0  # weight for the dice loss
+    TEST:
+      TASK: 'vis'  # video instance segmentation task
+      WINDOW_INFERENCE: True  # run inference on small frame windows for memory savings
+      WINDOW_SIZE: 15  # size of the window for inference (smaller = less memory)
+      #MAX_NUM: 10   # limits how many instances are predicted per frame
+  VIDEO_HEAD:
+    NUM_NEW_INS: 10  # maximum number of new instances to consider per frame
   #   TRAINING_SELECT_THRESHOLD: 0.02   # confidence threshold for selecting detections during training
   #   INFERENCE_SELECT_THRESHOLD: 0.01  # confidence threshold for selecting detections during inference
   #   AUX_INFERENCE_SELECT_THRESHOLD: 0.01  # confidence threshold for selecting detections during auxiliary inference
@@ -46,27 +46,37 @@ DATASETS:
 SOLVER:
   IMS_PER_BATCH: 1  # Images per batch... Adjust based on your GPU memory (ran out of memory with 3)
   BASE_LR: 0.0001  # base learning rate... keep low for fine tuning
-  STEPS: (6000, 8000)     # Iterations at which the learning rate is decreased... Adjusted for 10k iterations.
-  MAX_ITER: 10000     # Maximim number of training iterations... Increased from 1000, which was too short for 80 videos.
-  WARMUP_ITERS: 200   # Number of iterations for learning rate warmup... Adjusted for longer training (~2% of MAX_ITER).
-  CHECKPOINT_PERIOD: 200  # How often (in iterations) to save checkpoints... Increased to avoid saving too many checkpoints.
+  STEPS: (4400, 5520)     # Iterations at which the learning rate is decreased... Adjusted for 10k iterations.
+  MAX_ITER: 6900     # Maximim number of training iterations... Increased from 1000, which was too short for 80 videos.
+  WARMUP_ITERS: 138   # Number of iterations for learning rate warmup... Adjusted for longer training (~2% of MAX_ITER).
+  CHECKPOINT_PERIOD: 276  # How often (in iterations) to save checkpoints... Increased to avoid saving too many checkpoints.
   BACKBONE_MULTIPLIER: 0.1  # Multiplier for the learning rate of the backbone... Slower learning rate for backbone
+  # Memory optimization settings
+  CLIP_GRADIENTS:
+    ENABLED: True
+    CLIP_TYPE: "norm"
+    CLIP_VALUE: 0.1
+    NORM_TYPE: 2.0
 
-# INPUT:
+INPUT:
 #   MIN_SIZE_TRAIN: (360, 480) # shorter side of of images is resized to one of these values during training
 #   MIN_SIZE_TRAIN_SAMPLING: "choice" # how to sample the minimum size of the images during training (choice = randomly choose one of the values in MIN_SIZE_TRAIN)
 #   MAX_SIZE_TRAIN: 640 # longer side is capped at this value during training
-#   MIN_SIZE_TEST: 360 # shorter side of of images is resized to this value during testing
-#   MAX_SIZE_TEST: 640 # longer side is capped at this value during testing
-#   SAMPLING_FRAME_NUM: 8 # number of frames to sample from each video clip during training (each epoch samples a different clip from each video)
-#   SAMPLING_FRAME_RANGE: 4 # how many frames to sample before and after the reference frame
+  MIN_SIZE_TEST: 224 # shorter side of of images is resized to this value during testing
+  MAX_SIZE_TEST: 320 # longer side is capped at this value during testing
+  SAMPLING_FRAME_NUM: 15 # number of frames to sample from each video clip during training (reduced from 21 to save memory)
+  SAMPLING_FRAME_RANGE: 7 # how many frames to sample before and after the reference frame (reduced from 10 to save memory)
+
 #   REVERSE_AGU: True # whether to randomly reverse the order of the frames for augmentation
 #   RANDOM_FLIP: "flip_by_clip"  # type of random flip augmentation (flip_by_clip = flip all frames in a clip the same way)
 #   FORMAT: "RGB" # color format of the images (RGB = red, green, blue)
-
+  SAMPLING_FRAME_STRIDE: 3 # increased stride to reduce memory usage (was 2)
 DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: True # whether to filter out images with no annotations
   # NUM_WORKERS: 2  # Number of workers for data loading... Set to 0 for inference, 4 for training
   # ASPECT_RATIO_GROUPING: False  # whether to group images by aspect ratio... Disable for video data  
 
-OUTPUT_DIR: '/home/simone/fish-dvis/dvis-model-outputs/trained_models/dvis_daq_vitl_offline_80vids_10k'
+OUTPUT_DIR: '/store/simone/dvis-model-outputs/trained_models/unmasked_0.0001_15f'
+
+#TEST:
+#  EVAL_PERIOD: 50  # How often to run evaluation

@@ -30,4 +30,4 @@ DATASETS:
   TRAIN: ("ytvis_fishway_train",)  # training dataset
   TEST: ("ytvis_fishway_val",)  # testing dataset
 
-OUTPUT_DIR: '/home/simone/fish-dvis/dvis-model-outputs'
+OUTPUT_DIR: '/store/simone/dvis-model-outputs'
