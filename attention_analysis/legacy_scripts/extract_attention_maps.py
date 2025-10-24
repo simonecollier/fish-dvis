@@ -607,42 +607,32 @@ class AttentionExtractor:
         if hasattr(self.model, 'refiner'):
             refiner = self.model.refiner
             
-            
             # Long temporal self-attention layers
             if hasattr(refiner, 'transformer_time_self_attention_layers'):
                 for i, layer in enumerate(refiner.transformer_time_self_attention_layers):
-                    def make_temporal_hook(layer_idx):
-                        def hook(module, input, output):
-                            return self._store_refiner_long_temp_attention(layer_idx, output)
-                        return hook
-                    
-                    # Hook directly into the SelfAttentionLayer.forward method instead of the underlying nn.MultiheadAttention
-                    layer.register_forward_hook(make_temporal_hook(i))
-                    logger.info(f"Registered refiner long temporal attention hook for layer {i} (SelfAttentionLayer level)")
+                    layer.self_attn.register_forward_hook(
+                        lambda module, input, output, layer_idx=i: 
+                        self._store_refiner_long_temp_attention(layer_idx, output)
+                    )
+                    logger.info(f"Registered refiner long temporal attention hook for layer {i}")
             
             # Object self-attention layers
             if hasattr(refiner, 'transformer_obj_self_attention_layers'):
                 for i, layer in enumerate(refiner.transformer_obj_self_attention_layers):
-                    def make_obj_hook(layer_idx):
-                        def hook(module, input, output):
-                            return self._store_refiner_obj_attention(layer_idx, output)
-                        return hook
-                    
-                    # Hook directly into the SelfAttentionLayer.forward method instead of the underlying nn.MultiheadAttention
-                    layer.register_forward_hook(make_obj_hook(i))
-                    logger.info(f"Registered refiner object attention hook for layer {i} (SelfAttentionLayer level)")
+                    layer.self_attn.register_forward_hook(
+                        lambda module, input, output, layer_idx=i: 
+                        self._store_refiner_obj_attention(layer_idx, output)
+                    )
+                    logger.info(f"Registered refiner object attention hook for layer {i}")
             
             # Cross-attention layers
             if hasattr(refiner, 'transformer_cross_attention_layers'):
                 for i, layer in enumerate(refiner.transformer_cross_attention_layers):
-                    def make_cross_hook(layer_idx):
-                        def hook(module, input, output):
-                            return self._store_refiner_cross_attention(layer_idx, output)
-                        return hook
-                    
-                    # Hook directly into the CrossAttentionLayer.forward method instead of the underlying nn.MultiheadAttention
-                    layer.register_forward_hook(make_cross_hook(i))
-                    logger.info(f"Registered refiner cross-attention hook for layer {i} (CrossAttentionLayer level)")
+                    layer.multihead_attn.register_forward_hook(
+                        lambda module, input, output, layer_idx=i: 
+                        self._store_refiner_cross_attention(layer_idx, output)
+                    )
+                    logger.info(f"Registered refiner cross-attention hook for layer {i}")
     
     # Attention storage methods
     def _store_backbone_attention(self, layer_idx: int, output):
@@ -745,124 +735,18 @@ class AttentionExtractor:
     
     def _store_refiner_long_temp_attention(self, layer_idx: int, output):
         """Store refiner long temporal attention maps"""
-        # The SelfAttentionLayer.forward method returns just the output tensor, not attention weights
-        # We need to extract attention weights from the underlying MultiheadAttention layer
-        key = f'refiner_long_temp_attn_layer_{layer_idx}'
-        
-        # For now, we'll store the output tensor as a placeholder to indicate the hook was called
-        # In the future, we could modify the SelfAttentionLayer to also return attention weights
-        
-        # Check if we should store this specific attention map
-        should_store_full = False
-        if self.selective_storage:
-            should_store_full = key in self.target_attention_keys
-        elif not self.attention_summary_only:
-            should_store_full = True
-        
-        if should_store_full:
-            # Store the output tensor for this specific key
-            if isinstance(output, torch.Tensor):
-                if self.aggressive_memory_mode and output.is_cuda:
-                    output = output.detach().cpu()
-                else:
-                    output = output.detach()
-                self.attention_maps[key] = output
-                logger.debug(f"Stored refiner temporal attention output: {key}, shape: {output.shape}")
-            else:
-                # Fallback: store a placeholder
-                placeholder_tensor = torch.tensor([1.0])
-                self.attention_maps[key] = placeholder_tensor
-                logger.debug(f"Stored refiner temporal attention placeholder: {key}")
-        else:
-            # Process immediately and store only summary
-            if isinstance(output, torch.Tensor):
-                summary = self._process_attention_immediately(key, output)
-            else:
-                placeholder_tensor = torch.tensor([1.0])
-                summary = self._process_attention_immediately(key, placeholder_tensor)
-            if summary:
-                self.attention_maps[key] = summary
-        
-        # CRITICAL: Return the output to allow forward pass to continue
-        return output
+        if isinstance(output, tuple) and len(output) > 1:
+            self.attention_maps[f'refiner_long_temp_attn_layer_{layer_idx}'] = output[1].detach()
     
     def _store_refiner_obj_attention(self, layer_idx: int, output):
         """Store refiner object attention maps"""
-        # The SelfAttentionLayer.forward method returns just the output tensor, not attention weights
-        key = f'refiner_obj_attention_layer_{layer_idx}'
-        
-        # Check if we should store this specific attention map
-        should_store_full = False
-        if self.selective_storage:
-            should_store_full = key in self.target_attention_keys
-        elif not self.attention_summary_only:
-            should_store_full = True
-        
-        if should_store_full:
-            # Store the output tensor for this specific key
-            if isinstance(output, torch.Tensor):
-                if self.aggressive_memory_mode and output.is_cuda:
-                    output = output.detach().cpu()
-                else:
-                    output = output.detach()
-                self.attention_maps[key] = output
-                logger.debug(f"Stored refiner object attention output: {key}, shape: {output.shape}")
-            else:
-                # Fallback: store a placeholder
-                placeholder_tensor = torch.tensor([1.0])
-                self.attention_maps[key] = placeholder_tensor
-                logger.debug(f"Stored refiner object attention placeholder: {key}")
-        else:
-            # Process immediately and store only summary
-            if isinstance(output, torch.Tensor):
-                summary = self._process_attention_immediately(key, output)
-            else:
-                placeholder_tensor = torch.tensor([1.0])
-                summary = self._process_attention_immediately(key, placeholder_tensor)
-            if summary:
-                self.attention_maps[key] = summary
-        
-        # CRITICAL: Return the output to allow forward pass to continue
-        return output
+        if isinstance(output, tuple) and len(output) > 1:
+            self.attention_maps[f'refiner_obj_attention_layer_{layer_idx}'] = output[1].detach()
     
     def _store_refiner_cross_attention(self, layer_idx: int, output):
         """Store refiner cross-attention maps"""
-        # The CrossAttentionLayer.forward method returns just the output tensor, not attention weights
-        key = f'refiner_cross_attn_layer_{layer_idx}'
-        
-        # Check if we should store this specific attention map
-        should_store_full = False
-        if self.selective_storage:
-            should_store_full = key in self.target_attention_keys
-        elif not self.attention_summary_only:
-            should_store_full = True
-        
-        if should_store_full:
-            # Store the output tensor for this specific key
-            if isinstance(output, torch.Tensor):
-                if self.aggressive_memory_mode and output.is_cuda:
-                    output = output.detach().cpu()
-                else:
-                    output = output.detach()
-                self.attention_maps[key] = output
-                logger.debug(f"Stored refiner cross-attention output: {key}, shape: {output.shape}")
-            else:
-                # Fallback: store a placeholder
-                placeholder_tensor = torch.tensor([1.0])
-                self.attention_maps[key] = placeholder_tensor
-                logger.debug(f"Stored refiner cross-attention placeholder: {key}")
-        else:
-            # Process immediately and store only summary
-            if isinstance(output, torch.Tensor):
-                summary = self._process_attention_immediately(key, output)
-            else:
-                placeholder_tensor = torch.tensor([1.0])
-                summary = self._process_attention_immediately(key, placeholder_tensor)
-            if summary:
-                self.attention_maps[key] = summary
-        
-        # CRITICAL: Return the output to allow forward pass to continue
-        return output
+        if isinstance(output, tuple) and len(output) > 1:
+            self.attention_maps[f'refiner_cross_attn_layer_{layer_idx}'] = output[1].detach()
     
     def extract_attention_for_video(self, video_id: str, save_attention: bool = True, print_shapes: bool = True):
         """
@@ -1153,33 +1037,17 @@ class AttentionExtractor:
                 # Extract frames for this window
                 window_frames = images_tensor[start_frame:end_frame]
                 
+                # Make sure images are on GPU and convert to proper dtype
+                if torch.cuda.is_available():
+                    window_frames = window_frames.cuda()
+                
                 # Convert from uint8 to float32 and normalize to [0, 1] range if needed
                 if window_frames.dtype == torch.uint8:
                     window_frames = window_frames.float() / 255.0
                 
-                # Make sure images are on GPU and match model's dtype
-                if torch.cuda.is_available():
-                    # Get model device and dtype
-                    model_device = next(self.model.parameters()).device
-                    model_dtype = next(self.model.parameters()).dtype
-                    window_frames = window_frames.to(device=model_device, dtype=model_dtype)
-                    print(f"DEBUG: window_frames device: {window_frames.device}, dtype: {window_frames.dtype}")
-                    print(f"DEBUG: model device: {model_device}, dtype: {model_dtype}")
-                
                 # Process this window through the pipeline
-                # Create a proper batched input format that the model expects
-                batched_input = [{
-                    'image': window_frames,
-                    'height': window_frames.shape[2],
-                    'width': window_frames.shape[3],
-                    'video_id': f'window_{window_idx}',
-                    'video_len': window_frames.shape[0],
-                    'frame_idx': list(range(window_frames.shape[0])),
-                    'file_names': [f'frame_{i}.jpg' for i in range(window_frames.shape[0])]
-                }]
-                
-                # Use the model's forward method which handles the proper inference pipeline
-                window_output = self.model(batched_input)
+                with torch.cuda.amp.autocast():  # Use mixed precision to save memory
+                    common_out = self.model.common_inference(window_frames, window_size=actual_window_size, long_video_start_fidx=-1, to_store="cpu")
                 
                 # Process attention maps immediately - either store summaries or full tensors
                 window_attention_data = {}
@@ -1855,20 +1723,15 @@ class AttentionExtractor:
             # Compute summaries from full tensors
             for attn_name, attn_tensor in self.attention_maps.items():
                 if attn_tensor is not None:
-                    # Check if it's a tensor or already a summary dict
-                    if isinstance(attn_tensor, torch.Tensor):
-                        summary[attn_name] = {
-                            'shape': list(attn_tensor.shape),
-                            'dtype': str(attn_tensor.dtype),
-                            'device': str(attn_tensor.device),
-                            'min_value': float(attn_tensor.min()),
-                            'max_value': float(attn_tensor.max()),
-                            'mean_value': float(attn_tensor.mean()),
-                            'std_value': float(attn_tensor.std())
-                        }
-                    elif isinstance(attn_tensor, dict):
-                        # Already a summary, use it directly
-                        summary[attn_name] = attn_tensor
+                    summary[attn_name] = {
+                        'shape': list(attn_tensor.shape),
+                        'dtype': str(attn_tensor.dtype),
+                        'device': str(attn_tensor.device),
+                        'min_value': float(attn_tensor.min()),
+                        'max_value': float(attn_tensor.max()),
+                        'mean_value': float(attn_tensor.mean()),
+                        'std_value': float(attn_tensor.std())
+                    }
         
         return summary
     
