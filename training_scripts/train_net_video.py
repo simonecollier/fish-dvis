@@ -307,19 +307,94 @@ def setup(args):
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
 
-    # Register custom datasets
-    register_ytvis_instances(
-        "ytvis_fishway_train",
-        {},
-        "/data/fishway_ytvis/train.json",
-        "/data/fishway_ytvis/all_videos_mask"
-    )
-    register_ytvis_instances(
-        "ytvis_fishway_val",
-        {},
-        "/data/fishway_ytvis/val.json",
-        "/data/fishway_ytvis/all_videos_mask"
-    )
+    # Register custom datasets based on config file
+    # Read the config file to determine which datasets are needed
+    import yaml
+    with open(args.config_file, 'r') as f:
+        config_data = yaml.safe_load(f)
+    
+    train_datasets = config_data.get('DATASETS', {}).get('TRAIN', [])
+    test_datasets = config_data.get('DATASETS', {}).get('TEST', [])
+    
+    # Determine datatype from dataset names
+    datatype = None
+    if train_datasets:
+        if 'camera' in train_datasets[0]:
+            datatype = 'camera'
+        elif 'silhouette' in train_datasets[0]:
+            datatype = 'silhouette'
+    
+    print(f"Detected datatype: {datatype}")
+    
+    # Register datasets based on detected datatype
+    if datatype == 'camera':
+        print("Registering camera datasets...")
+        register_ytvis_instances(
+            "ytvis_fishway_train_camera",
+            {},
+            "/data/fishway_ytvis/train.json",
+            "/data/fishway_ytvis/all_videos"
+        )
+        register_ytvis_instances(
+            "ytvis_fishway_val_camera",
+            {},
+            "/data/fishway_ytvis/val.json",
+            "/data/fishway_ytvis/all_videos"
+        )
+    elif datatype == 'silhouette':
+        print("Registering silhouette datasets...")
+        register_ytvis_instances(
+            "ytvis_fishway_train_silhouette",
+            {},
+            "/data/fishway_ytvis/train.json",
+            "/data/fishway_ytvis/all_videos_mask"
+        )
+        register_ytvis_instances(
+            "ytvis_fishway_val_silhouette",
+            {},
+            "/data/fishway_ytvis/val.json",
+            "/data/fishway_ytvis/all_videos_mask"
+        )
+    else:
+        print("Warning: Could not determine datatype from config file. Registering all datasets.")
+        # Fallback: register all datasets if datatype cannot be determined
+        register_ytvis_instances(
+            "ytvis_fishway_train_camera",
+            {},
+            "/data/fishway_ytvis/train.json",
+            "/data/fishway_ytvis/all_videos"
+        )
+        register_ytvis_instances(
+            "ytvis_fishway_val_camera",
+            {},
+            "/data/fishway_ytvis/val.json",
+            "/data/fishway_ytvis/all_videos"
+        )
+        register_ytvis_instances(
+            "ytvis_fishway_train_silhouette",
+            {},
+            "/data/fishway_ytvis/train.json",
+            "/data/fishway_ytvis/all_videos_mask"
+        )
+        register_ytvis_instances(
+            "ytvis_fishway_val_silhouette",
+            {},
+            "/data/fishway_ytvis/val.json",
+            "/data/fishway_ytvis/all_videos_mask"
+        )
+
+    # register_ytvis_instances(
+    #     "ytvis_fishway_train",
+    #     {},
+    #     "/data/fishway_ytvis/train.json",
+    #     "/data/fishway_ytvis/all_videos"
+    # )
+    # register_ytvis_instances(
+    #     "ytvis_fishway_val",
+    #     {},
+    #     "/data/fishway_ytvis/val.json",
+    #     "/data/fishway_ytvis/all_videos"
+    # )
 
     # Add debug flag to config
     cfg.DEBUG = args.debug

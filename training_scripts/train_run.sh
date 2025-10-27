@@ -1,13 +1,36 @@
 #!/bin/bash
 source /home/simone/.venv/bin/activate
 export DETECTRON2_DATASETS=/data
-export CUDA_VISIBLE_DEVICES=0 
+export CUDA_VISIBLE_DEVICES=1 
 export PYTHONPATH=/home/simone/fish-dvis/DVIS_Plus/DVIS_DAQ
 export LD_LIBRARY_PATH=/home/simone/.venv/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH
 export PYTHONWARNINGS="ignore::FutureWarning"
 
-# Config file path
-CONFIG_FILE="/home/simone/fish-dvis/configs/DAQ_Fishway_config.yaml"
+# Parse command line arguments
+if [ $# -eq 0 ]; then
+    echo "Error: datatype argument is required"
+    echo "Usage: $0 {camera|silhouette}"
+    exit 1
+fi
+
+DATATYPE="$1"
+
+# Validate datatype parameter
+if [ "$DATATYPE" != "camera" ] && [ "$DATATYPE" != "silhouette" ]; then
+    echo "Error: datatype must be either 'camera' or 'silhouette'"
+    echo "Usage: $0 {camera|silhouette}"
+    exit 1
+fi
+
+# Select config file based on datatype
+if [ "$DATATYPE" = "camera" ]; then
+    CONFIG_FILE="/home/simone/fish-dvis/configs/DAQ_Fishway_config_camera.yaml"
+elif [ "$DATATYPE" = "silhouette" ]; then
+    CONFIG_FILE="/home/simone/fish-dvis/configs/DAQ_Fishway_config_silhouette.yaml"
+fi
+
+echo "Using datatype: $DATATYPE"
+echo "Using config file: $CONFIG_FILE"
 
 # Extract OUTPUT_DIR from config file
 OUTPUT_DIR=$(grep "OUTPUT_DIR:" "$CONFIG_FILE" | sed 's/.*OUTPUT_DIR:[[:space:]]*//' | tr -d "'")
