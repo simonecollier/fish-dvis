@@ -78,10 +78,12 @@ from dvis_Plus.data_video.datasets.builtin import register_ytvis_instances
 class AttentionExtractor:
     """Class to manage attention extraction hooks and data saving."""
     
-    def __init__(self, model, output_dir, top_n=1):
+    def __init__(self, model, output_dir, top_n=1, rollout=False):
         self.model = model
         self.output_dir = output_dir
         self.top_n = top_n
+        self.rollout = rollout
+        self.num_layers = 6  # DVIS-DAQ refiner has 6 layers
         self.hooks = []
         self.attention_data = []
         self.video_attention_data = {}  # video_id -> attention_data
@@ -228,15 +230,33 @@ class AttentionExtractor:
                     # If it's already converted to list, use the length
                     num_frames = len(attn_weights)
         
+        # Apply rollout if requested
+        final_attention_maps = video_data['attention_maps']
+        if self.rollout:
+            logger = logging.getLogger(__name__)
+            logger.info("Applying attention rollout to extracted attention maps")
+            final_attention_maps = self.apply_rollout_to_attention_maps(video_data['attention_maps'])
+            logger.info(f"Rollout completed: {len(final_attention_maps)} rolled-out attention maps")
+        
         # Prepare final save data
         save_data = {
             'video_id': video_id,
             'num_frames': num_frames,
-            'attention_maps': video_data['attention_maps'],
-            'num_maps': video_data['num_maps'],
+            'attention_maps': final_attention_maps,
+            'num_maps': len(final_attention_maps),
             'top_n': self.top_n,
             'top_instances_info': video_data['top_instances_info']
         }
+        
+        # Add rollout information if rollout was performed
+        if self.rollout:
+            save_data['rollout_info'] = {
+                'method': 'standard_attention_rollout',
+                'skip_connection_simulation': True,
+                'skip_factor': 0.5,
+                'num_layers_combined': self.num_layers,
+                'layer_order': 'B_6 × B_5 × B_4 × B_3 × B_2 × B_1'
+            }
         
         # Add prediction information for mapping instances
         if self.video_pred_info is not None:
@@ -268,6 +288,103 @@ class AttentionExtractor:
         logger.info(f"Saved attention data for video {video_id} with {num_frames} frames to {filepath}")
         logger.info(f"Top {self.top_n} instances: {video_data['top_instances_info']}")
     
+    def simulate_skip_connection(self, attention_matrix):
+        """
+        Simulate skip connection by blending attention with identity matrix.
+        
+        Args:
+            attention_matrix: Attention matrix of shape (num_frames, num_frames)
+            
+        Returns:
+            Blended matrix: 0.5 * (attention_matrix + identity)
+        """
+        num_frames = attention_matrix.shape[0]
+        identity = torch.eye(num_frames, device=attention_matrix.device, dtype=attention_matrix.dtype)
+        return 0.5 * (attention_matrix + identity)
+    
+    def perform_attention_rollout(self, attention_maps):
+        """
+        Perform attention rollout on the 6 refiner layers.
+        
+        Args:
+            attention_maps: List of attention maps, one per layer
+            
+        Returns:
+            Dictionary containing the rolled-out attention map
+        """
+        if len(attention_maps) != self.num_layers:
+            raise ValueError(f"Expected {self.num_layers} attention maps, got {len(attention_maps)}")
+        
+        # Convert attention maps to tensors and simulate skip connections
+        blended_maps = []
+        for i, attn_map in enumerate(attention_maps):
+            attention_weights = attn_map['attention_weights']
+            blended_map = self.simulate_skip_connection(attention_weights)
+            blended_maps.append(blended_map)
+        
+        # Perform attention rollout: T = B_6 × B_5 × B_4 × B_3 × B_2 × B_1
+        # (latest to earliest, newest on the left)
+        rolled_out_attention = blended_maps[5]  # Start with layer 6 (index 5)
+        for i in range(4, -1, -1):  # Go from layer 5 down to layer 1
+            rolled_out_attention = torch.matmul(rolled_out_attention, blended_maps[i])
+        
+        return {
+            'layer': 'refiner_time_self_attn_rollout',
+            'attention_weights': rolled_out_attention,
+            'shape': list(rolled_out_attention.shape),
+            'rollout_method': 'standard_with_skip_simulation',
+            'skip_factor': 0.5,
+            'layer_order': 'B_6 × B_5 × B_4 × B_3 × B_2 × B_1'
+        }
+    
+    def apply_rollout_to_attention_maps(self, attention_maps):
+        """
+        Apply attention rollout to the extracted attention maps.
+        
+        Args:
+            attention_maps: List of attention maps from different layers
+            
+        Returns:
+            List of rolled-out attention maps (one per instance)
+        """
+        # Group attention maps by instance
+        instance_attention_maps = {}
+        
+        for attn_map in attention_maps:
+            layer_name = attn_map['layer']
+            instance_info = attn_map.get('instance_info', {})
+            instance_id = instance_info.get('instance_id', 0)
+            
+            # Extract layer number from layer name (e.g., "refiner_time_self_attn_0_top_1" -> 0)
+            if 'refiner_time_self_attn_' in layer_name:
+                layer_num = int(layer_name.split('refiner_time_self_attn_')[1].split('_')[0])
+                
+                if instance_id not in instance_attention_maps:
+                    instance_attention_maps[instance_id] = {}
+                
+                instance_attention_maps[instance_id][layer_num] = attn_map
+        
+        # Perform rollout for each instance
+        rolled_out_maps = []
+        for instance_id, layer_maps in instance_attention_maps.items():
+            if len(layer_maps) == self.num_layers:
+                # Sort layers by number (0-5)
+                sorted_layers = [layer_maps[i] for i in range(self.num_layers)]
+                
+                # Perform attention rollout
+                rolled_out_map = self.perform_attention_rollout(sorted_layers)
+                
+                # Add instance information
+                if sorted_layers[0].get('instance_info'):
+                    rolled_out_map['instance_info'] = sorted_layers[0]['instance_info']
+                
+                rolled_out_maps.append(rolled_out_map)
+            else:
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Instance {instance_id} has {len(layer_maps)} layers, expected {self.num_layers}")
+        
+        return rolled_out_maps
+
     def finalize_video(self):
         """Finalize and save the current video's attention data."""
         if self.current_video_id is not None:
@@ -318,15 +435,17 @@ class Trainer(DefaultTrainer):
         return YTVISEvaluator(dataset_name, cfg, True, output_folder)
     
     @classmethod
-    def test_with_attention(cls, cfg, model, target_video_id=None, output_dir=None, top_n=1):
+    def test_with_attention(cls, cfg, model, target_video_id=None, output_dir=None, top_n=1, rollout=False):
         """
         Run evaluation with attention extraction on the test set.
         """
         logger = logging.getLogger(__name__)
         logger.info("Starting evaluation with attention extraction")
+        if rollout:
+            logger.info("Attention rollout will be applied to extracted attention maps")
         
         # Create attention extractor
-        attention_extractor = AttentionExtractor(model, output_dir, top_n=top_n)
+        attention_extractor = AttentionExtractor(model, output_dir, top_n=top_n, rollout=rollout)
         
         # Build data loader with correct mapper for video instance datasets
         dataset_name = cfg.DATASETS.TEST[0]
@@ -505,7 +624,8 @@ def main(args):
             target_video_id = getattr(args, 'target_video_id', None)
             output_dir = getattr(args, 'attention_output_dir', None)
             top_n = getattr(args, 'top_n', 1)
-            res = Trainer.test_with_attention(cfg, model, target_video_id, output_dir, top_n)
+            rollout = getattr(args, 'rollout', False)
+            res = Trainer.test_with_attention(cfg, model, target_video_id, output_dir, top_n, rollout)
         else:
             # Regular evaluation
             res = Trainer.test(cfg, model)
@@ -521,6 +641,7 @@ if __name__ == "__main__":
     parser.add_argument("--target-video-id", type=int, help="Target video ID to extract attention for")
     parser.add_argument("--attention-output-dir", type=str, help="Output directory for attention maps")
     parser.add_argument("--top-n", type=int, default=1, help="Number of top-scoring predictions to extract attention for (default: 1)")
+    parser.add_argument("--rollout", action="store_true", help="Perform attention rollout on the extracted attention maps")
     
     args = parser.parse_args()
     print("Command Line Args:", args)
