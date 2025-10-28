@@ -78,30 +78,73 @@ from dvis_Plus.data_video.datasets.builtin import register_ytvis_instances
 class AttentionExtractor:
     """Class to manage attention extraction hooks and data saving."""
     
-    def __init__(self, model, output_dir, top_n=1, rollout=False):
+    def __init__(self, model, output_dir, top_n=1, rollout=False, simulate_skip_connection=True):
         self.model = model
         self.output_dir = output_dir
         self.top_n = top_n
         self.rollout = rollout
+        self.simulate_skip_connection = simulate_skip_connection
         self.num_layers = 6  # DVIS-DAQ refiner has 6 layers
         self.hooks = []
         self.attention_data = []
         self.video_attention_data = {}  # video_id -> attention_data
         self.current_video_id = None
         self.video_pred_info = None  # Store prediction info for the current video
+        self.refiner_seq_ids = None  # Store sequence IDs from refiner
+        self.refiner_seq_id_list = None  # Store seq_id_list from common_inference
         
         # Register hooks for refiner attention layers
         self._register_hooks()
     
     def _register_hooks(self):
         """Register forward hooks to capture attention maps."""
-        # Only register refiner_time_self_attn hooks
+        # Register refiner temporal self-attention hooks
         for name, module in self.model.named_modules():
-            if 'refiner_time_self_attn' in name and hasattr(module, 'self_attn'):
+            if 'transformer_time_self_attention_layers' in name and hasattr(module, 'self_attn'):
                 hook = AttentionHook(name, module.self_attn)
                 module.self_attn.register_forward_hook(hook)
                 self.hooks.append(hook)
-                print(f"Registered hook for: {name}")
+        
+        # Hook to capture refiner sequence IDs
+        if hasattr(self.model, 'refiner'):
+            def refiner_hook(module, input, output):
+                if len(input) > 0:
+                    instance_embeds = input[0]
+                    if hasattr(instance_embeds, 'shape') and len(instance_embeds.shape) == 4:
+                        n_instances = instance_embeds.shape[-1]
+                        self.refiner_seq_ids = list(range(n_instances))
+            
+            self.model.refiner.register_forward_hook(refiner_hook)
+        
+        # Hook to capture sequence IDs from run_window_inference
+        if hasattr(self.model, 'run_window_inference'):
+            def window_inference_hook(module, input, output):
+                if isinstance(output, dict) and 'pred_ids' in output and output['pred_ids'] is not None:
+                    seq_ids = output['pred_ids']
+                    if hasattr(seq_ids, 'cpu'):
+                        seq_ids = seq_ids.cpu().numpy().tolist()
+                    self.refiner_seq_ids = seq_ids
+            
+            original_run_window_inference = self.model.run_window_inference
+            def hooked_run_window_inference(*args, **kwargs):
+                result = original_run_window_inference(*args, **kwargs)
+                window_inference_hook(self.model, args, result)
+                return result
+            self.model.run_window_inference = hooked_run_window_inference
+        
+        # Hook to capture seq_id_list from common_inference
+        if hasattr(self.model, 'common_inference'):
+            def common_inference_hook(module, input, output):
+                if isinstance(output, dict) and 'seq_id_list' in output and output['seq_id_list'] is not None:
+                    self.refiner_seq_id_list = output['seq_id_list']
+                return output
+            
+            original_common_inference = self.model.common_inference
+            def hooked_common_inference(*args, **kwargs):
+                result = original_common_inference(*args, **kwargs)
+                common_inference_hook(self.model, args, result)
+                return result
+            self.model.common_inference = hooked_common_inference
     
     def clear_attention_data(self):
         """Clear accumulated attention data."""
@@ -125,7 +168,6 @@ class AttentionExtractor:
         # Initialize video data structure if this is a new video
         if video_id != self.current_video_id:
             if self.current_video_id is not None:
-                # Save the previous video's data
                 self.save_video_attention_data()
             self.current_video_id = video_id
             self.video_attention_data[video_id] = {}
@@ -145,55 +187,48 @@ class AttentionExtractor:
             elif pred_ids is not None:
                 pred_ids = list(pred_ids)
             
-            # Create list of (confidence, instance_idx, seq_id) tuples
+            # Create prediction-confidence pairs with correct refiner instance mapping
             instance_confidence_pairs = []
             for i, conf in enumerate(confidence_scores):
                 seq_id = pred_ids[i] if pred_ids and i < len(pred_ids) else i
-                instance_confidence_pairs.append((conf, i, seq_id))
+                refiner_instance_idx = seq_id
+                instance_confidence_pairs.append((conf, refiner_instance_idx, seq_id))
             
             # Sort by confidence (descending) and take top N
             instance_confidence_pairs.sort(key=lambda x: x[0], reverse=True)
             top_instances = instance_confidence_pairs[:self.top_n]
             
-            logger = logging.getLogger(__name__)
-            logger.info(f"Selected top {len(top_instances)} instances out of {len(confidence_scores)} total instances")
-            
             # Filter attention maps for top instances
             for attn_map in all_attention_maps:
-                attn_weights = attn_map['attention_weights']  # Shape: [num_instances, num_frames, num_frames]
+                attn_weights = attn_map['attention_weights']
                 
-                # Extract attention maps for top instances
-                for rank, (conf, instance_idx, seq_id) in enumerate(top_instances):
-                    if instance_idx < attn_weights.shape[0]:  # Ensure valid index
-                        filtered_weights = attn_weights[instance_idx].clone()
+                for rank, (conf, refiner_instance_idx, seq_id) in enumerate(top_instances):
+                    if refiner_instance_idx < attn_weights.shape[0]:
+                        filtered_weights = attn_weights[refiner_instance_idx].clone()
                         
                         filtered_attention_maps.append({
                             'layer': f"{attn_map['layer']}_top_{rank+1}",
                             'attention_weights': filtered_weights,
                             'shape': filtered_weights.shape,
                             'instance_info': {
-                                'instance_id': instance_idx,
+                                'refiner_instance_id': refiner_instance_idx,
                                 'sequence_id': seq_id,
-                                'prediction_id': rank,  # Final prediction rank (0-based)
+                                'prediction_rank': rank,
                                 'confidence_score': conf,
-                                'rank': rank + 1  # Human-readable rank (1-based)
+                                'rank': rank + 1
                             }
                         })
                         
                         top_instances_info.append({
                             'rank': rank + 1,
-                            'instance_id': instance_idx,
+                            'refiner_instance_id': refiner_instance_idx,
                             'sequence_id': seq_id,
-                            'prediction_id': rank,
+                            'prediction_rank': rank,
                             'confidence_score': conf
                         })
-            
-            logger.info(f"Filtered to {len(filtered_attention_maps)} attention maps for top {self.top_n} predictions")
         else:
             # If no prediction info, save all attention maps (fallback)
             filtered_attention_maps = all_attention_maps
-            logger = logging.getLogger(__name__)
-            logger.warning("No prediction info available, saving all attention maps")
         
         # Store attention data for this video
         self.video_attention_data[video_id] = {
@@ -224,14 +259,22 @@ class AttentionExtractor:
             if 'attention_weights' in first_attn_map:
                 attn_weights = first_attn_map['attention_weights']
                 if hasattr(attn_weights, 'shape'):
-                    # Shape should be [num_frames, num_frames] for temporal attention
-                    num_frames = attn_weights.shape[0]
+                    # Shape should be [num_instances, num_frames, num_frames] for temporal attention
+                    # We want the second dimension (num_frames)
+                    if len(attn_weights.shape) == 3:
+                        num_frames = attn_weights.shape[1]  # Second dimension is num_frames
+                    elif len(attn_weights.shape) == 2:
+                        num_frames = attn_weights.shape[0]  # For 2D case, first dimension is num_frames
                 elif isinstance(attn_weights, list):
-                    # If it's already converted to list, use the length
-                    num_frames = len(attn_weights)
+                    # If it's already converted to list, use the length of the first sublist
+                    if attn_weights and isinstance(attn_weights[0], list):
+                        num_frames = len(attn_weights[0])
+                    else:
+                        num_frames = len(attn_weights)
         
         # Apply rollout if requested
         final_attention_maps = video_data['attention_maps']
+        
         if self.rollout:
             logger = logging.getLogger(__name__)
             logger.info("Applying attention rollout to extracted attention maps")
@@ -272,7 +315,13 @@ class AttentionExtractor:
             }
         
         # Save to file
-        filename = f"attention_maps_video_{video_id}_top_{self.top_n}.json"
+        if self.rollout:
+            if self.simulate_skip_connection:
+                filename = f"attention_maps_video_{video_id}_top_{self.top_n}_rollout.json"
+            else:
+                filename = f"attention_maps_video_{video_id}_top_{self.top_n}_rollout_no_skip.json"
+        else:
+            filename = f"attention_maps_video_{video_id}_top_{self.top_n}.json"
         filepath = os.path.join(self.output_dir, filename)
         
         # Convert tensors to lists for JSON serialization
@@ -288,7 +337,7 @@ class AttentionExtractor:
         logger.info(f"Saved attention data for video {video_id} with {num_frames} frames to {filepath}")
         logger.info(f"Top {self.top_n} instances: {video_data['top_instances_info']}")
     
-    def simulate_skip_connection(self, attention_matrix):
+    def apply_skip_connection_simulation(self, attention_matrix):
         """
         Simulate skip connection by blending attention with identity matrix.
         
@@ -315,25 +364,36 @@ class AttentionExtractor:
         if len(attention_maps) != self.num_layers:
             raise ValueError(f"Expected {self.num_layers} attention maps, got {len(attention_maps)}")
         
-        # Convert attention maps to tensors and simulate skip connections
-        blended_maps = []
+        # Convert attention maps to tensors
+        processed_maps = []
         for i, attn_map in enumerate(attention_maps):
             attention_weights = attn_map['attention_weights']
-            blended_map = self.simulate_skip_connection(attention_weights)
-            blended_maps.append(blended_map)
+            if self.simulate_skip_connection:
+                processed_map = self.apply_skip_connection_simulation(attention_weights)
+            else:
+                processed_map = attention_weights
+            processed_maps.append(processed_map)
         
         # Perform attention rollout: T = B_6 × B_5 × B_4 × B_3 × B_2 × B_1
         # (latest to earliest, newest on the left)
-        rolled_out_attention = blended_maps[5]  # Start with layer 6 (index 5)
+        rolled_out_attention = processed_maps[5]  # Start with layer 6 (index 5)
         for i in range(4, -1, -1):  # Go from layer 5 down to layer 1
-            rolled_out_attention = torch.matmul(rolled_out_attention, blended_maps[i])
+            rolled_out_attention = torch.matmul(rolled_out_attention, processed_maps[i])
+        
+        # Determine rollout method description
+        if self.simulate_skip_connection:
+            rollout_method = 'standard_with_skip_simulation'
+            skip_factor = 0.5
+        else:
+            rollout_method = 'pure_matrix_multiplication'
+            skip_factor = None
         
         return {
             'layer': 'refiner_time_self_attn_rollout',
             'attention_weights': rolled_out_attention,
             'shape': list(rolled_out_attention.shape),
-            'rollout_method': 'standard_with_skip_simulation',
-            'skip_factor': 0.5,
+            'rollout_method': rollout_method,
+            'skip_factor': skip_factor,
             'layer_order': 'B_6 × B_5 × B_4 × B_3 × B_2 × B_1'
         }
     
@@ -353,11 +413,13 @@ class AttentionExtractor:
         for attn_map in attention_maps:
             layer_name = attn_map['layer']
             instance_info = attn_map.get('instance_info', {})
-            instance_id = instance_info.get('instance_id', 0)
+            instance_id = instance_info.get('refiner_instance_id', 0)
             
-            # Extract layer number from layer name (e.g., "refiner_time_self_attn_0_top_1" -> 0)
-            if 'refiner_time_self_attn_' in layer_name:
-                layer_num = int(layer_name.split('refiner_time_self_attn_')[1].split('_')[0])
+            # Extract layer number from layer name (e.g., "refiner.transformer_time_self_attention_layers.0_top_1" -> 0)
+            if 'transformer_time_self_attention_layers.' in layer_name:
+                # Extract the number after the dot and before the underscore
+                parts = layer_name.split('transformer_time_self_attention_layers.')[1]
+                layer_num = int(parts.split('_')[0])
                 
                 if instance_id not in instance_attention_maps:
                     instance_attention_maps[instance_id] = {}
@@ -435,21 +497,27 @@ class Trainer(DefaultTrainer):
         return YTVISEvaluator(dataset_name, cfg, True, output_folder)
     
     @classmethod
-    def test_with_attention(cls, cfg, model, target_video_id=None, output_dir=None, top_n=1, rollout=False):
+    def test_with_attention(cls, cfg, model, target_video_id=None, output_dir=None, top_n=1, rollout=False, simulate_skip_connection=True):
         """
         Run evaluation with attention extraction on the test set.
         """
         logger = logging.getLogger(__name__)
         logger.info("Starting evaluation with attention extraction")
         if rollout:
-            logger.info("Attention rollout will be applied to extracted attention maps")
+            if simulate_skip_connection:
+                logger.info("Attention rollout will be applied with skip connection simulation")
+            else:
+                logger.info("Attention rollout will be applied with pure matrix multiplication")
         
         # Create attention extractor
-        attention_extractor = AttentionExtractor(model, output_dir, top_n=top_n, rollout=rollout)
+        attention_extractor = AttentionExtractor(model, output_dir, top_n=top_n, rollout=rollout, simulate_skip_connection=simulate_skip_connection)
         
         # Build data loader with correct mapper for video instance datasets
         dataset_name = cfg.DATASETS.TEST[0]
         dataset_type = cfg.DATASETS.DATASET_TYPE_TEST[0]
+        logger.info(f"Dataset name: {dataset_name}")
+        logger.info(f"Dataset type: {dataset_type}")
+        
         mapper_dict = {
             'video_instance': YTVISDatasetMapper,
             'video_panoptic': PanopticDatasetVideoMapper,
@@ -460,6 +528,8 @@ class Trainer(DefaultTrainer):
             raise NotImplementedError
         mapper = mapper_dict[dataset_type](cfg, is_train=False)
         data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+        
+        logger.info(f"Data loader created with {len(data_loader)} batches")
         
         # Build evaluator
         evaluator = cls.build_evaluator(cfg, cfg.DATASETS.TEST[0])
@@ -488,15 +558,15 @@ class Trainer(DefaultTrainer):
         for idx, inputs in enumerate(data_loader):
             # Check if we should process this batch
             if target_video_id is not None:
-                # Extract video ID from inputs (assuming it's in the first input)
                 input_data = inputs[0] if isinstance(inputs, list) else inputs
+                video_id = None
                 if hasattr(input_data, 'get'):
                     video_id = input_data.get('video_id', None)
-                    if video_id is not None and video_id != target_video_id:
-                        logger.info(f"Skipping batch {idx}: video_id {video_id} != target {target_video_id}")
-                        continue
-                else:
-                    logger.warning(f"Could not extract video_id from input, processing batch {idx}")
+                elif hasattr(input_data, 'video_id'):
+                    video_id = input_data.video_id
+                
+                if video_id is not None and video_id != target_video_id:
+                    continue
             
             logger.info(f"Processing batch {idx}/{total}")
             
@@ -507,35 +577,22 @@ class Trainer(DefaultTrainer):
             with torch.no_grad():
                 outputs = model(inputs)
             
-            # Save attention data for this batch along with prediction info
+            # Extract prediction info
             video_id = target_video_id if target_video_id is not None else idx
-            
-            # Extract sequence IDs and prediction info for mapping
             pred_logits = outputs.get("pred_logits", None)
             pred_masks = outputs.get("pred_masks", None)
             pred_ids = outputs.get("pred_ids", None)
             
-            # Debug: print available keys
-            logger.info(f"Available output keys: {list(outputs.keys())}")
-            
-            # Calculate confidence scores from logits
+            # Calculate confidence scores
             confidence_scores = None
             if pred_logits is not None:
                 confidence_scores = F.softmax(pred_logits, dim=-1).max(dim=-1)[0].cpu().numpy().tolist()
-            else:
-                # Try to get confidence from other sources
-                if "scores" in outputs:
-                    scores = outputs["scores"]
-                    if hasattr(scores, 'cpu'):
-                        confidence_scores = scores.cpu().numpy().tolist()
-                    else:
-                        confidence_scores = scores
-                elif "pred_scores" in outputs:
-                    pred_scores = outputs["pred_scores"]
-                    if hasattr(pred_scores, 'cpu'):
-                        confidence_scores = pred_scores.cpu().numpy().tolist()
-                    else:
-                        confidence_scores = pred_scores
+            elif "pred_scores" in outputs:
+                pred_scores = outputs["pred_scores"]
+                if hasattr(pred_scores, 'cpu'):
+                    confidence_scores = pred_scores.cpu().numpy().tolist()
+                else:
+                    confidence_scores = pred_scores
             
             pred_info = {
                 "pred_logits": pred_logits,
@@ -546,18 +603,13 @@ class Trainer(DefaultTrainer):
                 "available_keys": list(outputs.keys())
             }
             
+            # Accumulate attention data
             attention_extractor.accumulate_attention_data(video_id, pred_info=pred_info)
             
-            # Log instance mapping information
+            # Log completion
             if pred_info.get('pred_ids') is not None:
                 seq_ids = pred_info['pred_ids'].cpu().numpy().tolist() if hasattr(pred_info['pred_ids'], 'cpu') else pred_info['pred_ids']
-                logger.info(f"Video {video_id}: Found {pred_info['num_predictions']} predictions with sequence IDs: {seq_ids}")
-            else:
-                logger.info(f"Video {video_id}: No predictions found (refiner may have been skipped)")
-            
-            # Run evaluation on this batch
-            # Skip evaluator for attention extraction to avoid the _predictions bug
-            # evaluator.process(inputs, outputs)
+                logger.info(f"Video {video_id}: Attention extraction completed successfully")
             
             # Break if we found our target video
             if target_video_id is not None:
@@ -566,9 +618,6 @@ class Trainer(DefaultTrainer):
         
         # Finalize the current video's attention data
         attention_extractor.finalize_video()
-        
-        # Process outputs through evaluator (commented out for attention extraction)
-        # return evaluator.evaluate()
         return {}
 
 
@@ -614,8 +663,10 @@ def main(args):
     cfg = setup(args)
     
     model = Trainer.build_model(cfg)
+    # Use specific trained model weights
+    model_weights_path = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_s1_fixed/model_0003635.pth"
     DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
-        cfg.MODEL.WEIGHTS, resume=args.resume
+        model_weights_path, resume=args.resume
     )
     
     if args.eval_only:
@@ -625,7 +676,8 @@ def main(args):
             output_dir = getattr(args, 'attention_output_dir', None)
             top_n = getattr(args, 'top_n', 1)
             rollout = getattr(args, 'rollout', False)
-            res = Trainer.test_with_attention(cfg, model, target_video_id, output_dir, top_n, rollout)
+            simulate_skip_connection = not getattr(args, 'no_skip_connection', False)
+            res = Trainer.test_with_attention(cfg, model, target_video_id, output_dir, top_n, rollout, simulate_skip_connection)
         else:
             # Regular evaluation
             res = Trainer.test(cfg, model)
@@ -642,9 +694,9 @@ if __name__ == "__main__":
     parser.add_argument("--attention-output-dir", type=str, help="Output directory for attention maps")
     parser.add_argument("--top-n", type=int, default=1, help="Number of top-scoring predictions to extract attention for (default: 1)")
     parser.add_argument("--rollout", action="store_true", help="Perform attention rollout on the extracted attention maps")
+    parser.add_argument("--no-skip-connection", action="store_true", help="Disable skip connection simulation during rollout (use pure matrix multiplication)")
     
     args = parser.parse_args()
-    print("Command Line Args:", args)
     
     launch(
         main,
