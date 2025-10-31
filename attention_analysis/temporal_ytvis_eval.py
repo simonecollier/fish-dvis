@@ -79,6 +79,13 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
     a replica of results.json augmented with refiner_id per prediction.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attention_extractor = None
+
+    def set_attention_extractor(self, extractor):
+        self._attention_extractor = extractor
+
     def reset(self):
         super().reset()
         self._predictions_temporal = []
@@ -93,6 +100,32 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"TemporalYTVISEvaluator process() failed to add refiner ids: {e}")
+
+        # Capture attention maps if extractor is provided
+        try:
+            if self._attention_extractor is not None and len(inputs) == 1:
+                video_id = inputs[0].get("video_id")
+                # Pull collected attention maps from hooks and store per video
+                attn_maps = getattr(self._attention_extractor, "attention_maps", None)
+                if attn_maps:
+                    # Move to CPU numpy and clear buffer
+                    to_save = []
+                    for entry in attn_maps:
+                        weights = entry.get('attention_weights')
+                        if isinstance(weights, torch.Tensor):
+                            weights = weights.detach().cpu().numpy()
+                        to_save.append({
+                            'layer': entry.get('layer'),
+                            'shape': tuple(entry.get('shape')) if entry.get('shape') is not None else None,
+                            'attention_weights': weights,
+                        })
+                    # Accumulate per video in extractor
+                    video_data = self._attention_extractor.video_attention_data.setdefault(video_id, [])
+                    video_data.extend(to_save)
+                    # Clear for next sample
+                    self._attention_extractor.attention_maps.clear()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed capturing attention maps: {e}")
 
     def evaluate(self):
         if self._distributed:
@@ -137,6 +170,43 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
             with PathManager.open(temporal_path, "w") as f:
                 f.write(json.dumps(temporal_predictions))
                 f.flush()
+
+            # Persist attention maps per video if present
+            try:
+                if self._attention_extractor is not None and self._attention_extractor.video_attention_data:
+                    attn_dir = os.path.join(self._output_dir, "attention_maps")
+                    os.makedirs(attn_dir, exist_ok=True)
+                    for vid, entries in self._attention_extractor.video_attention_data.items():
+                        # Build a compact npz per video: store arrays as separate keys
+                        arrays = {}
+                        meta = []
+                        for idx, entry in enumerate(entries):
+                            arr = entry.get('attention_weights')
+                            key = f"attn_{idx}"
+                            if isinstance(arr, np.ndarray):
+                                arrays[key] = arr
+                            meta.append({
+                                'key': key,
+                                'layer': entry.get('layer'),
+                                'shape': entry.get('shape'),
+                            })
+                        # Save arrays and metadata
+                        npz_path = os.path.join(attn_dir, f"video_{vid}.npz")
+                        if arrays:
+                            try:
+                                np.savez_compressed(npz_path, **arrays)
+                            except Exception:
+                                # Fallback to uncompressed if compression fails
+                                np.savez(npz_path, **arrays)
+                        # Save metadata json alongside
+                        meta_path = os.path.join(attn_dir, f"video_{vid}.meta.json")
+                        with PathManager.open(meta_path, "w") as mf:
+                            mf.write(json.dumps(meta))
+                            mf.flush()
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    f"Failed to write attention maps: {e}"
+                )
 
             # Also write a compact summary of all refiner ids (overall and per video)
             try:

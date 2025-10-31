@@ -68,6 +68,9 @@ from dvis_daq.config import add_daq_config
 #from data_scripts.ytvis_loader import register_all_ytvis_fishway
 from dvis_Plus.data_video.datasets.ytvis import register_ytvis_instances
 from temporal_ytvis_eval import TemporalYTVISEvaluator
+from attention_extractor import AttentionExtractor
+
+ATTENTION_EXTRACTOR = None
 
 class Trainer(DefaultTrainer):
     """
@@ -85,13 +88,12 @@ class Trainer(DefaultTrainer):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
             os.makedirs(output_folder, exist_ok=True)
-
-        if cfg.MODEL.MASK_FORMER.TEST.TASK == "vos":
-            return None
-
-        evaluator_dict = {'vis': TemporalYTVISEvaluator, 'vss': VSSEvaluator, 'vps': VPSEvaluator, 'mots': UniYTVISEvaluator}
-        assert cfg.MODEL.MASK_FORMER.TEST.TASK in evaluator_dict.keys()
-        return evaluator_dict[cfg.MODEL.MASK_FORMER.TEST.TASK](dataset_name, cfg, True, output_folder)
+        evaluator = TemporalYTVISEvaluator(dataset_name, cfg, True, output_folder)
+        # Attach the attention extractor if available
+        global ATTENTION_EXTRACTOR
+        if ATTENTION_EXTRACTOR is not None and hasattr(evaluator, 'set_attention_extractor'):
+            evaluator.set_attention_extractor(ATTENTION_EXTRACTOR)
+        return evaluator
 
     @classmethod
     def build_test_loader(cls, cfg, dataset_name, dataset_type):
@@ -270,6 +272,14 @@ def main(args):
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
+        # Initialize attention extractor after weights are loaded
+        try:
+            global ATTENTION_EXTRACTOR
+            from temporal_ytvis_eval import TemporalYTVISEvaluator  # ensure import for hooks
+            # Create the extractor using the model already built and loaded
+            ATTENTION_EXTRACTOR = AttentionExtractor(model, cfg.OUTPUT_DIR)
+        except Exception as e:
+            print(f"[WARN] Attention extractor could not be initialized: {e}")
         res = Trainer.test(cfg, model)
         if cfg.TEST.AUG.ENABLED:
             raise NotImplementedError
