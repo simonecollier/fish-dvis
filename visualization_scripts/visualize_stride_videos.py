@@ -245,13 +245,13 @@ def visualize_stride_dataset(stride, max_videos=5, output_dir="./stride_visualiz
     """Visualize videos from a specific stride dataset."""
     
     # Paths
-    train_json_path = f"/data/fishway_ytvis/train_stride{stride}.json"
-    val_json_path = f"/data/fishway_ytvis/val_stride{stride}.json"
+    # train_json_path = f"/data/fishway_ytvis/train.json"
+    val_json_path = f"/data/fishway_ytvis/val.json"
     
     # Check if files exist
-    if not os.path.exists(train_json_path):
-        print(f"Error: Training JSON not found: {train_json_path}")
-        return
+    # if not os.path.exists(train_json_path):
+    #     print(f"Error: Training JSON not found: {train_json_path}")
+    #     return
     
     if not os.path.exists(val_json_path):
         print(f"Error: Validation JSON not found: {val_json_path}")
@@ -259,37 +259,37 @@ def visualize_stride_dataset(stride, max_videos=5, output_dir="./stride_visualiz
     
     # Create output directories
     stride_output_dir = os.path.join(output_dir, f"stride_{stride}")
-    train_output_dir = os.path.join(stride_output_dir, "train")
+    # train_output_dir = os.path.join(stride_output_dir, "train")
     val_output_dir = os.path.join(stride_output_dir, "val")
     
-    os.makedirs(train_output_dir, exist_ok=True)
+    # os.makedirs(train_output_dir, exist_ok=True)
     os.makedirs(val_output_dir, exist_ok=True)
     
     # Load datasets
     print(f"Loading stride {stride} datasets...")
-    with open(train_json_path, 'r') as f:
-        train_data = json.load(f)
+    # with open(train_json_path, 'r') as f:
+    #     train_data = json.load(f)
     
     with open(val_json_path, 'r') as f:
         val_data = json.load(f)
     
-    print(f"Train: {len(train_data['videos'])} videos, {len(train_data['annotations'])} annotations")
+    # print(f"Train: {len(train_data['videos'])} videos, {len(train_data['annotations'])} annotations")
     print(f"Val: {len(val_data['videos'])} videos, {len(val_data['annotations'])} annotations")
     
-    # Process training videos
-    print(f"\nProcessing training videos (max {max_videos})...")
-    train_videos = random.sample(train_data['videos'], min(max_videos, len(train_data['videos'])))
+    # # Process training videos
+    # print(f"\nProcessing training videos (max {max_videos})...")
+    # train_videos = random.sample(train_data['videos'], min(max_videos, len(train_data['videos'])))
     
-    for video in train_videos:
-        output_path = os.path.join(train_output_dir, f"video_{video['id']}_stride{stride}.mp4")
-        create_video_visualization(
-            video, 
-            train_data['annotations'], 
-            train_data['categories'], 
-            output_path, 
-            stride,
-            base_path="/data/fishway_ytvis/all_videos"
-        )
+    # for video in train_videos:
+    #     output_path = os.path.join(train_output_dir, f"video_{video['id']}_stride{stride}.mp4")
+    #     create_video_visualization(
+    #         video, 
+    #         train_data['annotations'], 
+    #         train_data['categories'], 
+    #         output_path, 
+    #         stride,
+    #         base_path="/data/fishway_ytvis/all_videos"
+    #     )
     
     # Process validation videos
     print(f"\nProcessing validation videos (max {max_videos})...")
