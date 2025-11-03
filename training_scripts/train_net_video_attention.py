@@ -5,6 +5,10 @@ MaskFormer Training Script with Attention Extraction.
 This script is a modified version of the training script in detectron2/tools
 with added attention extraction capabilities.
 """
+
+# Model configuration - Update these variables as needed
+MODEL_DIR = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_silhouette_lr5e-4_redo"
+CHECKPOINT_NUM = "0003635"
 try:
     # ignore ShapelyDeprecationWarning from fvcore
     from shapely.errors import ShapelyDeprecationWarning
@@ -24,11 +28,101 @@ import gc
 import json
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
 
+# Import RLE utilities
+try:
+    from pycocotools import mask as coco_mask
+    PYCOCOTOOLS_AVAILABLE = True
+except ImportError:
+    PYCOCOTOOLS_AVAILABLE = False
+    print("Warning: pycocotools not available. Masks will be saved as raw data.")
+
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+_CATEGORIES_CACHE = None
+
+def _load_categories_from_val():
+    global _CATEGORIES_CACHE
+    if _CATEGORIES_CACHE is not None:
+        return _CATEGORIES_CACHE
+    try:
+        val_json_path = os.path.join(MODEL_DIR, "val.json")
+        with open(val_json_path, 'r') as f:
+            val_data = json.load(f)
+        categories = val_data.get('categories', [])
+        id_to_name = {c.get('id'): c.get('name') for c in categories if 'id' in c}
+        _CATEGORIES_CACHE = {
+            'id_to_name': id_to_name,
+            'num_categories': len(categories),
+        }
+    except Exception:
+        _CATEGORIES_CACHE = {
+            'id_to_name': {},
+            'num_categories': 0,
+        }
+    return _CATEGORIES_CACHE
+
+def _map_model_index_to_category(model_index: int):
+    cats = _load_categories_from_val()
+    # Default mapping assumes dataset category ids are 1..N and model indices are 0..N-1
+    dataset_category_id = (model_index + 1) if model_index is not None else None
+    category_name = cats['id_to_name'].get(dataset_category_id) if dataset_category_id is not None else None
+    return dataset_category_id, category_name
+
+def convert_mask_to_rle(mask_tensor):
+    """
+    Convert a binary mask tensor to RLE format for efficient storage.
+    
+    Args:
+        mask_tensor: Binary mask tensor of shape (H, W) or (T, H, W)
+        
+    Returns:
+        RLE encoded mask or original tensor if conversion fails
+    """
+    if not PYCOCOTOOLS_AVAILABLE:
+        return mask_tensor.tolist() if isinstance(mask_tensor, torch.Tensor) else mask_tensor
+    
+    try:
+        # Convert to numpy if it's a tensor
+        if isinstance(mask_tensor, torch.Tensor):
+            mask_np = mask_tensor.cpu().numpy()
+        else:
+            mask_np = mask_tensor
+        
+        # Ensure it's binary (0s and 1s)
+        mask_np = (mask_np > 0.5).astype(np.uint8)
+        
+        # Handle different tensor shapes
+        if len(mask_np.shape) == 2:
+            # Single mask: (H, W)
+            rle = coco_mask.encode(np.asfortranarray(mask_np))
+            return rle['counts'].decode('utf-8') if isinstance(rle['counts'], bytes) else rle
+        elif len(mask_np.shape) == 3:
+            # Video mask: (T, H, W) - convert each frame
+            rles = []
+            for t in range(mask_np.shape[0]):
+                frame_mask = mask_np[t]
+                rle = coco_mask.encode(np.asfortranarray(frame_mask))
+                # Convert bytes to string if necessary
+                if isinstance(rle['counts'], bytes):
+                    rle['counts'] = rle['counts'].decode('utf-8')
+                rles.append(rle)
+            return rles
+        else:
+            # Fallback to list conversion
+            return mask_np.tolist()
+            
+    except Exception as e:
+        print(f"Warning: Failed to convert mask to RLE: {e}")
+        # Fallback to list conversion
+        if isinstance(mask_tensor, torch.Tensor):
+            return mask_tensor.tolist()
+        else:
+            return mask_tensor
 
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
@@ -230,11 +324,13 @@ class AttentionExtractor:
             # If no prediction info, save all attention maps (fallback)
             filtered_attention_maps = all_attention_maps
         
-        # Store attention data for this video
+        # Store attention data for this video (only top prediction data)
         self.video_attention_data[video_id] = {
             'attention_maps': filtered_attention_maps,
             'num_maps': len(filtered_attention_maps),
-            'top_instances_info': top_instances_info
+            'top_instances_info': top_instances_info,
+            'top_prediction_info': pred_info.get('top_prediction_info', None) if pred_info else None,
+            'top_prediction_masks': pred_info.get('top_prediction_masks', None) if pred_info else None
         }
         
         # Clear data for next video
@@ -272,47 +368,42 @@ class AttentionExtractor:
                     else:
                         num_frames = len(attn_weights)
         
-        # Apply rollout if requested
-        final_attention_maps = video_data['attention_maps']
+        # Always prepare individual attention maps
+        individual_attention_maps = video_data['attention_maps']
         
+        # Apply rollout if requested
+        rolled_out_attention_maps = None
         if self.rollout:
             logger = logging.getLogger(__name__)
             logger.info("Applying attention rollout to extracted attention maps")
-            final_attention_maps = self.apply_rollout_to_attention_maps(video_data['attention_maps'])
-            logger.info(f"Rollout completed: {len(final_attention_maps)} rolled-out attention maps")
+            rolled_out_attention_maps = self.apply_rollout_to_attention_maps(video_data['attention_maps'])
+            logger.info(f"Rollout completed: {len(rolled_out_attention_maps)} rolled-out attention maps")
         
-        # Prepare final save data
+        # Prepare final save data with both individual and rolled-out maps
         save_data = {
             'video_id': video_id,
             'num_frames': num_frames,
-            'attention_maps': final_attention_maps,
-            'num_maps': len(final_attention_maps),
+            'attention_maps': individual_attention_maps,
+            'num_maps': len(individual_attention_maps),
             'top_n': self.top_n,
             'top_instances_info': video_data['top_instances_info']
         }
+        
+        # Add rolled-out attention maps if rollout was performed
+        if self.rollout and rolled_out_attention_maps is not None:
+            save_data['rolled_out_attention_maps'] = rolled_out_attention_maps
+            save_data['num_rolled_out_maps'] = len(rolled_out_attention_maps)
         
         # Add rollout information if rollout was performed
         if self.rollout:
             save_data['rollout_info'] = {
                 'method': 'standard_attention_rollout',
                 'skip_connection_simulation': True,
-                'skip_factor': 0.5,
+                'skip_factor': 1,
                 'num_layers_combined': self.num_layers,
                 'layer_order': 'B_6 × B_5 × B_4 × B_3 × B_2 × B_1'
             }
         
-        # Add prediction information for mapping instances
-        if self.video_pred_info is not None:
-            pred_logits = self.video_pred_info.get('pred_logits', None)
-            pred_masks = self.video_pred_info.get('pred_masks', None)
-            
-            save_data['prediction_info'] = {
-                'num_predictions': self.video_pred_info.get('num_predictions', 0),
-                'pred_ids': self.video_pred_info.get('pred_ids', None),
-                'confidence_scores': self.video_pred_info.get('confidence_scores', None),
-                'pred_logits_shape': list(pred_logits.shape) if pred_logits is not None and hasattr(pred_logits, 'shape') else None,
-                'pred_masks_shape': list(pred_masks.shape) if pred_masks is not None and hasattr(pred_masks, 'shape') else None
-            }
         
         # Save to file
         if self.rollout:
@@ -330,12 +421,87 @@ class AttentionExtractor:
             if isinstance(attn_map['attention_weights'], torch.Tensor):
                 attn_map['attention_weights'] = attn_map['attention_weights'].tolist()
         
+        # Convert rolled-out attention maps if they exist
+        if 'rolled_out_attention_maps' in json_data:
+            for attn_map in json_data['rolled_out_attention_maps']:
+                if isinstance(attn_map['attention_weights'], torch.Tensor):
+                    attn_map['attention_weights'] = attn_map['attention_weights'].tolist()
+        
         with open(filepath, 'w') as f:
             json.dump(json_data, f, indent=2)
         
         logger = logging.getLogger(__name__)
-        logger.info(f"Saved attention data for video {video_id} with {num_frames} frames to {filepath}")
+        if self.rollout:
+            logger.info(f"Saved attention data for video {video_id} with {num_frames} frames to {filepath}")
+            logger.info(f"Saved {len(individual_attention_maps)} individual layer maps and {len(rolled_out_attention_maps) if rolled_out_attention_maps else 0} rolled-out maps")
+        else:
+            logger.info(f"Saved attention data for video {video_id} with {num_frames} frames to {filepath}")
         logger.info(f"Top {self.top_n} instances: {video_data['top_instances_info']}")
+        
+        # Save top prediction separately
+        self.save_top_prediction(video_id, video_data)
+    
+    def save_top_prediction(self, video_id, video_data):
+        """Save the top-scoring prediction annotations in a separate JSON file."""
+        logger = logging.getLogger(__name__)
+        
+        # Prepare top prediction data
+        top_prediction_data = {
+            'video_id': video_id,
+            'top_prediction_info': video_data.get('top_prediction_info', None),
+            'top_prediction_masks': video_data.get('top_prediction_masks', None),
+            'top_instances_info': video_data.get('top_instances_info', [])
+        }
+        
+        # Convert masks to RLE format for efficient storage
+        if top_prediction_data['top_prediction_masks'] is not None:
+            # Store original shape before conversion
+            if isinstance(top_prediction_data['top_prediction_masks'], torch.Tensor):
+                top_prediction_data['top_prediction_masks_shape'] = list(top_prediction_data['top_prediction_masks'].shape)
+            else:
+                top_prediction_data['top_prediction_masks_shape'] = 'unknown'
+            
+            # Convert to RLE format
+            top_prediction_data['top_prediction_masks'] = convert_mask_to_rle(top_prediction_data['top_prediction_masks'])
+            
+            # Add RLE format information
+            if PYCOCOTOOLS_AVAILABLE:
+                top_prediction_data['mask_format'] = 'RLE'
+            else:
+                top_prediction_data['mask_format'] = 'raw_list'
+        else:
+            top_prediction_data['top_prediction_masks_shape'] = None
+            top_prediction_data['mask_format'] = None
+        
+        # Save to separate file
+        if self.rollout:
+            if self.simulate_skip_connection:
+                filename = f"top_prediction_video_{video_id}_top_{self.top_n}_rollout.json"
+            else:
+                filename = f"top_prediction_video_{video_id}_top_{self.top_n}_rollout_no_skip.json"
+        else:
+            filename = f"top_prediction_video_{video_id}_top_{self.top_n}.json"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        with open(filepath, 'w') as f:
+            json.dump(top_prediction_data, f, indent=2)
+        
+        # Log prediction information
+        if video_data.get('top_prediction_info'):
+            top_pred = video_data['top_prediction_info']
+            logger.info(f"Saved top prediction: class_id={top_pred.get('class_id')}, confidence={top_pred.get('confidence_score'):.4f}, sequence_id={top_pred.get('sequence_id')}")
+            
+            # Log mask information
+            if video_data.get('top_prediction_masks') is not None:
+                mask_shape = video_data['top_prediction_masks'].shape if hasattr(video_data['top_prediction_masks'], 'shape') else 'unknown'
+                logger.info(f"Top prediction masks saved with shape: {mask_shape}")
+            else:
+                logger.info("No top prediction masks available")
+        else:
+            logger.info("No top prediction information available")
+        
+        logger.info(f"Top prediction saved to: {filepath}")
     
     def apply_skip_connection_simulation(self, attention_matrix):
         """
@@ -345,11 +511,11 @@ class AttentionExtractor:
             attention_matrix: Attention matrix of shape (num_frames, num_frames)
             
         Returns:
-            Blended matrix: 0.5 * (attention_matrix + identity)
+            Blended matrix: 1 * (attention_matrix + identity)
         """
         num_frames = attention_matrix.shape[0]
         identity = torch.eye(num_frames, device=attention_matrix.device, dtype=attention_matrix.dtype)
-        return 0.5 * (attention_matrix + identity)
+        return 1 * (attention_matrix + identity)
     
     def perform_attention_rollout(self, attention_maps):
         """
@@ -383,7 +549,7 @@ class AttentionExtractor:
         # Determine rollout method description
         if self.simulate_skip_connection:
             rollout_method = 'standard_with_skip_simulation'
-            skip_factor = 0.5
+            skip_factor = 1
         else:
             rollout_method = 'pure_matrix_multiplication'
             skip_factor = None
@@ -574,31 +740,181 @@ class Trainer(DefaultTrainer):
             attention_extractor.clear_attention_data()
             
             # Run inference
+            from torch.cuda.amp import autocast
             with torch.no_grad():
-                outputs = model(inputs)
+                with autocast():
+                    outputs = model(inputs)
             
             # Extract prediction info
             video_id = target_video_id if target_video_id is not None else idx
             pred_logits = outputs.get("pred_logits", None)
             pred_masks = outputs.get("pred_masks", None)
             pred_ids = outputs.get("pred_ids", None)
+            # Additional possible keys present in some DVIS variants
+            scores_per_class = outputs.get("pred_scores_per_class", None) or outputs.get("class_logits", None) or outputs.get("logits", None)
+            generic_scores = outputs.get("pred_scores", None) or outputs.get("scores", None)
+            possible_class_keys = [
+                "pred_classes",
+                "pred_class",
+                "pred_labels",
+                "labels",
+                "classes",
+            ]
             
-            # Calculate confidence scores
+            # Calculate confidence scores and class predictions
             confidence_scores = None
-            if pred_logits is not None:
-                confidence_scores = F.softmax(pred_logits, dim=-1).max(dim=-1)[0].cpu().numpy().tolist()
-            elif "pred_scores" in outputs:
-                pred_scores = outputs["pred_scores"]
-                if hasattr(pred_scores, 'cpu'):
-                    confidence_scores = pred_scores.cpu().numpy().tolist()
+            class_predictions = None
+            top_prediction_info = None
+
+            # Prefer final, post-processed outputs used by evaluator/results.json
+            if "scores" in outputs:
+                pred_scores = outputs["scores"]
+                confidence_scores = pred_scores.cpu().numpy().tolist() if hasattr(pred_scores, 'cpu') else list(pred_scores)
+                # Classes may be provided under different keys
+                final_class_keys = ["category_id", "pred_classes", "pred_class", "labels", "classes"]
+                for k in final_class_keys:
+                    if k in outputs and outputs[k] is not None:
+                        vals = outputs[k]
+                        class_predictions = vals.cpu().numpy().tolist() if hasattr(vals, 'cpu') else list(vals)
+                        break
+                if len(confidence_scores) > 0:
+                    top_idx = int(np.argmax(confidence_scores))
+                    model_class_index = (class_predictions[top_idx] if isinstance(class_predictions, list) and len(class_predictions) > top_idx else class_predictions if isinstance(class_predictions, int) else None)
+                    category_id, category_name = _map_model_index_to_category(model_class_index) if model_class_index is not None else (None, None)
+                    seq_id = None
+                    if pred_ids is not None:
+                        try:
+                            seq_id = pred_ids[top_idx].item() if hasattr(pred_ids[top_idx], 'item') else pred_ids[top_idx]
+                        except Exception:
+                            seq_id = None
+                    if seq_id is None:
+                        logger.warning("pred_ids missing or unavailable; sequence_id cannot be determined reliably for top prediction")
+                    top_prediction_info = {
+                        "class_id": model_class_index,
+                        "category_id": category_id,
+                        "category_name": category_name,
+                        "confidence_score": confidence_scores[top_idx],
+                        "prediction_rank": 0,
+                        "sequence_id": seq_id
+                    }
+            elif pred_logits is not None:
+                # Get class predictions and confidence scores
+                class_probs = F.softmax(pred_logits, dim=-1)
+                confidence_scores = class_probs.max(dim=-1)[0].cpu().numpy().tolist()
+                class_predictions = class_probs.argmax(dim=-1).cpu().numpy().tolist()
+                
+                # Get top-scoring prediction info
+                if len(confidence_scores) > 0:
+                    top_idx = confidence_scores.index(max(confidence_scores))
+                    model_class_index = class_predictions[top_idx]
+                    category_id, category_name = _map_model_index_to_category(model_class_index)
+                    seq_id = None
+                    if pred_ids is not None:
+                        try:
+                            seq_id = pred_ids[top_idx].item() if hasattr(pred_ids[top_idx], 'item') else pred_ids[top_idx]
+                        except Exception:
+                            seq_id = None
+                    if seq_id is None:
+                        logger.warning("pred_ids missing or unavailable; sequence_id cannot be determined reliably for top prediction")
+                    top_prediction_info = {
+                        "class_id": model_class_index,
+                        "category_id": category_id,
+                        "category_name": category_name,
+                        "confidence_score": confidence_scores[top_idx],
+                        "prediction_rank": 0,
+                        "sequence_id": seq_id
+                    }
+            elif scores_per_class is not None:
+                # Scores/logits provided per class; derive class id and confidence
+                tensor = scores_per_class
+                if hasattr(tensor, 'softmax'):
+                    try:
+                        probs = F.softmax(tensor, dim=-1)
+                        confidence_scores = probs.max(dim=-1)[0].cpu().numpy().tolist()
+                        class_predictions = probs.argmax(dim=-1).cpu().numpy().tolist()
+                    except Exception:
+                        # Fall back to argmax/max directly (already probabilities)
+                        confidence_scores = tensor.max(dim=-1)[0].cpu().numpy().tolist()
+                        class_predictions = tensor.argmax(dim=-1).cpu().numpy().tolist()
                 else:
-                    confidence_scores = pred_scores
+                    # Assume list-like [num_inst, num_classes]
+                    arr = np.array(tensor)
+                    class_predictions = arr.argmax(axis=-1).tolist()
+                    confidence_scores = arr.max(axis=-1).tolist()
+                if len(confidence_scores) > 0:
+                    top_idx = confidence_scores.index(max(confidence_scores))
+                    model_class_index = class_predictions[top_idx]
+                    category_id, category_name = _map_model_index_to_category(model_class_index)
+                    seq_id = None
+                    if pred_ids is not None:
+                        try:
+                            seq_id = pred_ids[top_idx].item() if hasattr(pred_ids[top_idx], 'item') else pred_ids[top_idx]
+                        except Exception:
+                            seq_id = None
+                    if seq_id is None:
+                        logger.warning("pred_ids missing or unavailable; sequence_id cannot be determined reliably for top prediction")
+                    top_prediction_info = {
+                        "class_id": model_class_index,
+                        "category_id": category_id,
+                        "category_name": category_name,
+                        "confidence_score": confidence_scores[top_idx],
+                        "prediction_rank": 0,
+                        "sequence_id": seq_id
+                    }
+            elif generic_scores is not None:
+                # Only per-instance scores present; attempt to fetch classes from any known key
+                pred_scores = generic_scores
+                confidence_scores = pred_scores.cpu().numpy().tolist() if hasattr(pred_scores, 'cpu') else pred_scores
+                for k in possible_class_keys:
+                    if k in outputs and outputs[k] is not None:
+                        vals = outputs[k]
+                        class_predictions = vals.cpu().numpy().tolist() if hasattr(vals, 'cpu') else vals
+                        break
+                if len(confidence_scores) > 0:
+                    top_idx = confidence_scores.index(max(confidence_scores))
+                    model_class_index = (class_predictions[top_idx] if isinstance(class_predictions, list) and len(class_predictions) > top_idx else class_predictions if isinstance(class_predictions, int) else None)
+                    category_id, category_name = _map_model_index_to_category(model_class_index) if model_class_index is not None else (None, None)
+                    seq_id = None
+                    if pred_ids is not None:
+                        try:
+                            seq_id = pred_ids[top_idx].item() if hasattr(pred_ids[top_idx], 'item') else pred_ids[top_idx]
+                        except Exception:
+                            seq_id = None
+                    if seq_id is None:
+                        logger.warning("pred_ids missing or unavailable; sequence_id cannot be determined reliably for top prediction")
+                    top_prediction_info = {
+                        "class_id": model_class_index,
+                        "category_id": category_id,
+                        "category_name": category_name,
+                        "confidence_score": confidence_scores[top_idx],
+                        "prediction_rank": 0,
+                        "sequence_id": seq_id
+                    }
+            
+            # Extract mask data for top prediction
+            top_prediction_masks = None
+            if top_prediction_info and pred_masks is not None:
+                top_idx = confidence_scores.index(max(confidence_scores)) if confidence_scores else 0
+                if top_idx < len(pred_masks):
+                    top_prediction_masks = pred_masks[top_idx]
+                    # Convert to CPU and detach if it's a tensor
+                    if hasattr(top_prediction_masks, 'cpu'):
+                        top_prediction_masks = top_prediction_masks.cpu().detach()
+            # Prefer using final segmentations if available for exact parity with results.json
+            if top_prediction_info and "segmentations" in outputs:
+                segs = outputs["segmentations"]
+                top_idx = confidence_scores.index(max(confidence_scores)) if confidence_scores else 0
+                if isinstance(segs, list) and top_idx < len(segs):
+                    top_prediction_masks = segs[top_idx]
             
             pred_info = {
                 "pred_logits": pred_logits,
                 "pred_masks": pred_masks, 
                 "pred_ids": pred_ids,
                 "confidence_scores": confidence_scores,
+                "class_predictions": class_predictions,
+                "top_prediction_info": top_prediction_info,
+                "top_prediction_masks": top_prediction_masks,
                 "num_predictions": len(pred_logits) if pred_logits is not None else 0,
                 "available_keys": list(outputs.keys())
             }
@@ -634,7 +950,13 @@ def setup(args):
     add_dvis_config(cfg)
     add_ctvis_config(cfg)
     add_daq_config(cfg)
-    cfg.merge_from_file(args.config_file)
+    
+    # Use config file from model directory
+    model_config_file = os.path.join(MODEL_DIR, "config.yaml")
+    if not os.path.exists(model_config_file):
+        raise FileNotFoundError(f"Config file not found: {model_config_file}")
+    
+    cfg.merge_from_file(model_config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
     default_setup(cfg, args)
@@ -642,18 +964,28 @@ def setup(args):
     setup_logger(name="mask2former")
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="minvis")
     
-    # Register datasets
+    # Register validation dataset from model directory
+    val_json_path = os.path.join(MODEL_DIR, "val.json")
+    if not os.path.exists(val_json_path):
+        raise FileNotFoundError(f"Validation JSON not found: {val_json_path}")
+    
+    # Determine video directory based on config (camera vs silhouette)
+    # Check if the config contains camera or silhouette in the dataset paths
+    with open(model_config_file, 'r') as f:
+        config_content = f.read()
+        if 'camera' in config_content.lower():
+            video_dir = "/data/fishway_ytvis/all_videos"
+        elif 'silhouette' in config_content.lower():
+            video_dir = "/data/fishway_ytvis/all_videos_mask"
+        else:
+            # Default to camera if unclear
+            video_dir = "/data/fishway_ytvis/all_videos"
+    
     register_ytvis_instances(
-        "ytvis_fishway_train",
+        "ytvis_fishway_val_camera",
         {},
-        "/data/fishway_ytvis/train.json",
-        "/data/fishway_ytvis/all_videos"
-    )
-    register_ytvis_instances(
-        "ytvis_fishway_val",
-        {},
-        "/data/fishway_ytvis/val.json",
-        "/data/fishway_ytvis/all_videos"
+        val_json_path,
+        video_dir
     )
     
     return cfg
@@ -663,8 +995,11 @@ def main(args):
     cfg = setup(args)
     
     model = Trainer.build_model(cfg)
-    # Use specific trained model weights
-    model_weights_path = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_s1_fixed/model_0003635.pth"
+    # Use model weights from model directory
+    model_weights_path = os.path.join(MODEL_DIR, f"model_{CHECKPOINT_NUM}.pth")
+    if not os.path.exists(model_weights_path):
+        raise FileNotFoundError(f"Model weights not found: {model_weights_path}")
+    
     DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
         model_weights_path, resume=args.resume
     )
@@ -689,6 +1024,8 @@ def main(args):
 if __name__ == "__main__":
     # Add custom arguments for attention extraction
     parser = default_argument_parser()
+    # Override the config-file help text since we use the one from model directory
+    parser._actions[1].help = "Config file (ignored, uses config from model directory)"
     parser.add_argument("--extract-attention", action="store_true", help="Extract attention maps during evaluation")
     parser.add_argument("--target-video-id", type=int, help="Target video ID to extract attention for")
     parser.add_argument("--attention-output-dir", type=str, help="Output directory for attention maps")
@@ -697,6 +1034,13 @@ if __name__ == "__main__":
     parser.add_argument("--no-skip-connection", action="store_true", help="Disable skip connection simulation during rollout (use pure matrix multiplication)")
     
     args = parser.parse_args()
+    
+    # Print model configuration
+    print(f"Using model directory: {MODEL_DIR}")
+    print(f"Using checkpoint: {CHECKPOINT_NUM}")
+    print(f"Model weights: {os.path.join(MODEL_DIR, f'model_{CHECKPOINT_NUM}.pth')}")
+    print(f"Config file: {os.path.join(MODEL_DIR, 'config.yaml')}")
+    print(f"Validation data: {os.path.join(MODEL_DIR, 'val.json')}")
     
     launch(
         main,

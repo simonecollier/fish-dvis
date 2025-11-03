@@ -28,6 +28,8 @@ if [ -z "$1" ]; then
     echo "Example: $0 10 /path/to/output 5 --visualize --no-show --figsize 15 12 --cmap plasma"
     echo "Example: $0 10 /path/to/output 5 --visualize --no-skip-connection"
     echo ""
+    echo "Note: Rollout is enabled by default and will save both individual layers and rolled-out maps."
+    echo ""
     echo "Options:"
     echo "  --visualize        Generate heatmap visualizations after extraction"
     echo "  --no-show          Do not display plots (only save) - useful for headless systems"
@@ -41,7 +43,7 @@ if [ -z "$1" ]; then
 fi
 
 VIDEO_ID=$1
-ATTENTION_OUTPUT_DIR=${2:-"/home/simone/store/simone/attention_maps_single_video"}
+ATTENTION_OUTPUT_DIR=${2:-"/home/simone/store/simone/attention_maps_testredo"}
 TOP_N=${3:-1}
 
 # Parse additional arguments
@@ -91,6 +93,7 @@ echo "Extracting attention maps with rollout for video ID: $VIDEO_ID"
 echo "Output directory: $ATTENTION_OUTPUT_DIR"
 echo "Top N predictions: $TOP_N"
 echo "Using GPU 1 (CUDA_VISIBLE_DEVICES=1)"
+echo "Rollout: ENABLED (default) - both individual layers and rolled-out maps will be saved"
 if [ "$NO_SKIP_CONNECTION" = true ]; then
     echo "Skip connection simulation: DISABLED (pure matrix multiplication)"
 else
@@ -117,7 +120,7 @@ python train_net_video_attention.py \
 
 echo "Attention extraction with rollout completed!"
 echo "Check the output directory: $ATTENTION_OUTPUT_DIR"
-echo "The output will contain rolled-out attention maps instead of individual layer maps."
+echo "The output will contain both individual layer maps and rolled-out attention maps."
 
 # Generate visualizations if requested
 if [ "$VISUALIZE" = true ]; then

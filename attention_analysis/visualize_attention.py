@@ -152,6 +152,7 @@ def visualize_attention_maps(json_file, output_dir=None, show_plot=True,
                 figsize=figsize,
                 cmap=cmap
             )
+            logger.info(f"Saved attention map to: {output_path}")
             
             if show_plot:
                 plt.show()
@@ -162,8 +163,59 @@ def visualize_attention_maps(json_file, output_dir=None, show_plot=True,
             logger.error(f"Error creating heatmap for {layer_name}: {e}")
             continue
     
-    # Create summary plot if multiple attention maps
-    if len(data['attention_maps']) > 1:
+    # Process rolled-out attention maps if they exist
+    if 'rolled_out_attention_maps' in data and data['rolled_out_attention_maps']:
+        logger.info(f"Processing {len(data['rolled_out_attention_maps'])} rolled-out attention maps")
+        
+        for i, attn_map in enumerate(data['rolled_out_attention_maps']):
+            layer_name = attn_map['layer']
+            attention_weights = attn_map['attention_weights']
+            
+            logger.info(f"Processing rolled-out attention map {i+1}/{len(data['rolled_out_attention_maps'])}: {layer_name}")
+            logger.info(f"Attention matrix shape: {attn_map['shape']}")
+            
+            # Create title
+            title = f"Rolled-out Attention Map - {layer_name}"
+            
+            # Add rollout method info if available
+            if 'rollout_method' in attn_map:
+                title += f"\nMethod: {attn_map['rollout_method']}"
+            if 'skip_factor' in attn_map and attn_map['skip_factor'] is not None:
+                title += f", Skip Factor: {attn_map['skip_factor']}"
+            
+            # Add instance info if available
+            if 'instance_info' in attn_map:
+                inst_info = attn_map['instance_info']
+                title += f"\nInstance ID: {inst_info.get('instance_id', 'N/A')}, "
+                title += f"Rank: {inst_info.get('rank', 'N/A')}, "
+                title += f"Confidence: {inst_info.get('confidence_score', 'N/A'):.4f}"
+            
+            # Create output filename
+            output_filename = f"{base_name}_{layer_name.replace('refiner_time_self_attn_', 'layer_')}.png"
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Create heatmap
+            try:
+                fig, ax = create_attention_heatmap(
+                    attention_weights, 
+                    title=title,
+                    save_path=output_path,
+                    figsize=figsize,
+                    cmap=cmap
+                )
+                logger.info(f"Saved rolled-out attention map to: {output_path}")
+                
+                if show_plot:
+                    plt.show()
+                else:
+                    plt.close(fig)
+                    
+            except Exception as e:
+                logger.error(f"Error creating heatmap for rolled-out {layer_name}: {e}")
+                continue
+    
+    # Create summary plot if multiple attention maps or if rolled-out maps exist
+    if len(data['attention_maps']) > 1 or ('rolled_out_attention_maps' in data and data['rolled_out_attention_maps']):
         create_summary_plot(data, output_dir, base_name, figsize, cmap)
     
     logger.info(f"Visualization complete. Plots saved to: {output_dir}")
@@ -180,7 +232,12 @@ def create_summary_plot(data, output_dir, base_name, figsize, cmap):
         figsize (tuple): Figure size
         cmap (str): Colormap
     """
-    num_maps = len(data['attention_maps'])
+    # Combine individual and rolled-out attention maps for summary
+    all_attention_maps = data['attention_maps'].copy()
+    if 'rolled_out_attention_maps' in data and data['rolled_out_attention_maps']:
+        all_attention_maps.extend(data['rolled_out_attention_maps'])
+    
+    num_maps = len(all_attention_maps)
     
     # Calculate subplot layout
     if num_maps == 1:
@@ -207,7 +264,7 @@ def create_summary_plot(data, output_dir, base_name, figsize, cmap):
         axes = axes.flatten()
     
     # Plot each attention map
-    for i, attn_map in enumerate(data['attention_maps']):
+    for i, attn_map in enumerate(all_attention_maps):
         if i >= len(axes):
             break
             
@@ -218,8 +275,11 @@ def create_summary_plot(data, output_dir, base_name, figsize, cmap):
         # Create heatmap
         im = ax.imshow(attention_weights, cmap=cmap, aspect='auto')
         
-        # Set title
-        ax.set_title(f"{layer_name}", fontsize=10)
+        # Set title - add indicator for rolled-out maps
+        title = layer_name
+        if 'rollout_method' in attn_map:
+            title = f"ROLLOUT: {layer_name}"
+        ax.set_title(f"{title}", fontsize=10)
         ax.set_xlabel('Query Frame')
         ax.set_ylabel('Key Frame')
         
@@ -227,7 +287,7 @@ def create_summary_plot(data, output_dir, base_name, figsize, cmap):
         plt.colorbar(im, ax=ax, shrink=0.8)
     
     # Hide unused subplots
-    for i in range(len(data['attention_maps']), len(axes)):
+    for i in range(len(all_attention_maps), len(axes)):
         axes[i].set_visible(False)
     
     # Set main title
