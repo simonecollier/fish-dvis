@@ -61,8 +61,10 @@ def draw_truth_and_prediction(frame, true_species_name, pred_species_name, score
     # Draw score text (bottom line)
     cv2.putText(frame, score_text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
 
-def draw_frame_and_refiner(frame, frame_num, total_frames, refiner_id=None):
-    """Draw frame number and refiner ID stacked in bottom right corner"""
+def draw_frame_refiner_and_importance(frame, frame_num, total_frames, refiner_id=None, importance_value=None):
+    """Draw frame number, refiner ID, and per-frame importance stacked in bottom right corner.
+    importance_value should be in [0,1] if provided. A viridis-colored box is drawn next to the value.
+    """
     # Get frame dimensions
     height, width = frame.shape[:2]
     
@@ -73,29 +75,28 @@ def draw_frame_and_refiner(frame, frame_num, total_frames, refiner_id=None):
     color = (255, 255, 255)  # White text
     bg_color = (0, 0, 0)     # Black background
     
-    # Prepare text lines
+    # Prepare lines and measure sizes
+    lines = []
     frame_text = f"Frame {frame_num}/{total_frames}"
-    lines = [frame_text]
-    
+    lines.append(frame_text)
     if refiner_id is not None:
-        refiner_text = f"Refiner ID: {refiner_id}"
-        lines.append(refiner_text)
-    
-    # Get text sizes for all lines
-    line_widths = []
-    line_heights = []
-    for line in lines:
-        (w, h), baseline = cv2.getTextSize(line, font, font_scale, thickness)
-        line_widths.append(w)
-        line_heights.append(h)
-    
-    # Use the maximum width
-    max_width = max(line_widths)
-    line_height = line_heights[0]  # All lines should have same height
-    total_height = sum(line_heights) + (len(lines) - 1) * 5  # 5px spacing between lines
+        lines.append(f"Refiner ID: {refiner_id}")
+    if importance_value is not None:
+        lines.append(f"Importance: {importance_value:.2f}")
+
+    line_sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
+    line_heights = [cv2.getTextSize(line, font, font_scale, thickness)[0][1] for line in lines]
+    max_text_width = max([w for (w, h) in line_sizes]) if line_sizes else 0
+    line_height = line_heights[0] if line_heights else 0
+    total_height = sum(line_heights) + (len(lines) - 1) * 5
     
     # Position in bottom right corner with padding
     padding = 10
+    # Account extra width for importance color box if present
+    color_box_w = 14 if importance_value is not None else 0
+    color_box_pad = 8 if importance_value is not None else 0
+    max_width = max_text_width + color_box_w + color_box_pad
+
     x = width - max_width - padding
     y = height - padding
     
@@ -105,12 +106,47 @@ def draw_frame_and_refiner(frame, frame_num, total_frames, refiner_id=None):
     # Draw lines from bottom to top
     current_y = y
     for i, line in enumerate(reversed(lines)):
-        cv2.putText(frame, line, (x, current_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
-        if i < len(lines) - 1:  # Not the last line
+        # Draw colored box for importance line
+        if importance_value is not None and i == 0:  # bottom line is importance when reversed
+            # Viridis colormap mapping
+            try:
+                from matplotlib import colormaps as cmaps
+                rgba = cmaps.get_cmap('viridis')(float(importance_value))
+                bgr = (int(rgba[2]*255), int(rgba[1]*255), int(rgba[0]*255))
+            except Exception:
+                bgr = (0, 255, 255)  # fallback: yellow
+            # Box position to the left of text
+            box_x1 = x
+            box_y1 = current_y - line_height
+            box_x2 = x + color_box_w
+            box_y2 = current_y
+            cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), bgr, -1)
+            text_x = x + color_box_w + color_box_pad
+            cv2.putText(frame, line, (text_x, current_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+        else:
+            cv2.putText(frame, line, (x, current_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+        if i < len(lines) - 1:
             current_y -= (line_height + 5)
 
 def hex_to_bgr(hex_color):
     return tuple(int(hex_color[i:i+2], 16) for i in (4, 2, 0))
+
+def draw_small_top_right_label(frame, text):
+    """Draw a small label in the top right corner (smaller than main labels)."""
+    height, width = frame.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
+    color = (255, 255, 255)
+    bg_color = (0, 0, 0)
+
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    padding = 8
+    x = width - text_width - padding
+    y = padding + text_height
+    # background box
+    cv2.rectangle(frame, (x - 4, y - text_height - 4), (x + text_width + 4, y + 4), bg_color, -1)
+    cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
 
 def visualize_predictions(results_json, valid_json, image_root, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -150,6 +186,10 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir):
         all_preds_by_video.setdefault(pred["video_id"], []).append(pred)
 
     print(f"Found {len(all_preds_by_video)} videos with predictions")
+
+    # Derive run_dir to locate attention maps (two levels up from results_json)
+    run_dir = os.path.dirname(os.path.dirname(results_json))
+    attn_maps_dir = os.path.join(run_dir, "inference", "attention_maps")
     
     # Track videos that don't meet criteria
     skipped_videos = []
@@ -201,6 +241,18 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir):
             mask = decode_rle(rle, height, width)
             frame_masks[fn].append((mask, color))
 
+        # Load per-frame importance (row-normalized column averages) if available
+        importance_arr = None
+        try:
+            colavg_norm_npz = os.path.join(attn_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg_norm.npz")
+            if os.path.exists(colavg_norm_npz):
+                data = np.load(colavg_norm_npz)
+                # Key name per temporal_rollout.py
+                if 'rollout_rownorm_colavg_norm' in data:
+                    importance_arr = data['rollout_rownorm_colavg_norm']
+        except Exception:
+            importance_arr = None
+
         # Check if any frames have masks (only save videos with predictions)
         has_masks = any(len(masks) > 0 for masks in frame_masks.values())
         if not has_masks:
@@ -208,7 +260,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir):
             print(f"  Skipping video {video_id} - no masks to visualize")
             continue
 
-        output_video_path = os.path.join(output_dir, f"{folder_name}.mp4")
+        # Save file as top_pred_video_<video_id>.mp4
+        output_video_path = os.path.join(output_dir, f"top_pred_video_{video_id}.mp4")
         fps = 10
         out = None
 
@@ -222,8 +275,16 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir):
             # Draw truth, prediction, and score stacked in bottom left corner
             draw_truth_and_prediction(frame, true_species, pred_species_name, best_pred["score"])
             
-            # Draw frame number and refiner ID stacked in bottom right corner
-            draw_frame_and_refiner(frame, frame_idx, total_frames, refiner_id)
+            # Determine importance value for this frame index (0-based)
+            imp_val = None
+            if importance_arr is not None and (frame_idx - 1) < len(importance_arr):
+                imp_val = float(importance_arr[frame_idx - 1])
+
+            # Draw frame number, refiner ID, and importance in bottom right corner
+            draw_frame_refiner_and_importance(frame, frame_idx, total_frames, refiner_id, imp_val)
+
+            # Draw original name (folder_name) in top right corner, small font
+            draw_small_top_right_label(frame, folder_name)
 
             # Draw mask outline only (no label/score text)
             for mask, color in frame_masks.get(fn, []):
@@ -275,9 +336,9 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir):
         print("\nAll videos with predictions were successfully processed and saved.")
 
 if __name__ == "__main__":
-    results_json = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_silhouette_lr5e-4_redo/oct30_attn_0003635_eval/inference/results_temporal.json"
+    results_json = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_silhouette_lr5e-4_redo/attn_extract_0003635_eval/inference/results_temporal.json"
     valid_json = "/data/fishway_ytvis/val_5fish.json"
     image_root = "/data/fishway_ytvis/all_videos"
-    output_dir = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_silhouette_lr5e-4_redo/oct30_attn_0003635_eval/inference/video_predictions"
+    output_dir = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_silhouette_lr5e-4_redo/attn_extract_0003635_eval/inference/video_predictions"
 
     visualize_predictions(results_json, valid_json, image_root, output_dir)
