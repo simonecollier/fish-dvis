@@ -310,78 +310,69 @@ def setup(args):
     # Register custom datasets based on config file
     # Read the config file to determine which datasets are needed
     import yaml
+    import re
     with open(args.config_file, 'r') as f:
         config_data = yaml.safe_load(f)
     
     train_datasets = config_data.get('DATASETS', {}).get('TRAIN', [])
     test_datasets = config_data.get('DATASETS', {}).get('TEST', [])
     
-    # Determine datatype from dataset names
-    datatype = None
-    if train_datasets:
-        if 'camera' in train_datasets[0]:
-            datatype = 'camera'
-        elif 'silhouette' in train_datasets[0]:
-            datatype = 'silhouette'
+    # Helper function to extract stride and base info from dataset name
+    def parse_dataset_name(dataset_name):
+        """Extract stride value and base dataset info from dataset name.
+        
+        Returns:
+            tuple: (base_name, is_train, datatype, stride_value, stride_suffix)
+            - base_name: base name without stride suffix (e.g., 'ytvis_fishway_train_silhouette')
+            - is_train: True if train, False if val/test
+            - datatype: 'camera' or 'silhouette'
+            - stride_value: stride value (None if no stride)
+            - stride_suffix: '_stride{N}' or ''
+        """
+        # Match stride pattern: _stride{N} at the end
+        stride_match = re.search(r'_stride(\d+)$', dataset_name)
+        stride_value = int(stride_match.group(1)) if stride_match else None
+        stride_suffix = stride_match.group(0) if stride_match else ''
+        base_name = dataset_name[:-len(stride_suffix)] if stride_suffix else dataset_name
+        
+        # Determine if train or val
+        is_train = 'train' in base_name
+        is_val = 'val' in base_name
+        
+        # Determine datatype
+        datatype = 'silhouette' if 'silhouette' in base_name else 'camera'
+        
+        return base_name, is_train, datatype, stride_value, stride_suffix
     
-    print(f"Detected datatype: {datatype}")
+    # Collect all unique datasets that need to be registered
+    all_datasets = set(train_datasets + test_datasets)
+    registered_datasets = set()
     
-    # Register datasets based on detected datatype
-    if datatype == 'camera':
-        print("Registering camera datasets...")
-        register_ytvis_instances(
-            "ytvis_fishway_train_camera",
-            {},
-            "/data/fishway_ytvis/train.json",
-            "/data/fishway_ytvis/all_videos"
-        )
-        register_ytvis_instances(
-            "ytvis_fishway_val_camera",
-            {},
-            "/data/fishway_ytvis/val.json",
-            "/data/fishway_ytvis/all_videos"
-        )
-    elif datatype == 'silhouette':
-        print("Registering silhouette datasets...")
-        register_ytvis_instances(
-            "ytvis_fishway_train_silhouette",
-            {},
-            "/data/fishway_ytvis/train.json",
-            "/data/fishway_ytvis/all_videos_mask"
-        )
-        register_ytvis_instances(
-            "ytvis_fishway_val_silhouette",
-            {},
-            "/data/fishway_ytvis/val.json",
-            "/data/fishway_ytvis/all_videos_mask"
-        )
-    else:
-        print("Warning: Could not determine datatype from config file. Registering all datasets.")
-        # Fallback: register all datasets if datatype cannot be determined
-        register_ytvis_instances(
-            "ytvis_fishway_train_camera",
-            {},
-            "/data/fishway_ytvis/train.json",
-            "/data/fishway_ytvis/all_videos"
-        )
-        register_ytvis_instances(
-            "ytvis_fishway_val_camera",
-            {},
-            "/data/fishway_ytvis/val.json",
-            "/data/fishway_ytvis/all_videos"
-        )
-        register_ytvis_instances(
-            "ytvis_fishway_train_silhouette",
-            {},
-            "/data/fishway_ytvis/train.json",
-            "/data/fishway_ytvis/all_videos_mask"
-        )
-        register_ytvis_instances(
-            "ytvis_fishway_val_silhouette",
-            {},
-            "/data/fishway_ytvis/val.json",
-            "/data/fishway_ytvis/all_videos_mask"
-        )
+    # Register each dataset
+    for dataset_name in all_datasets:
+        if dataset_name in registered_datasets:
+            continue
+            
+        base_name, is_train, datatype, stride_value, stride_suffix = parse_dataset_name(dataset_name)
+        
+        # Determine JSON path
+        if is_train:
+            json_name = 'train'
+            image_root = '/data/fishway_ytvis/all_videos' if datatype == 'camera' else '/data/fishway_ytvis/all_videos_mask'
+        else:
+            json_name = 'val'
+            image_root = '/data/fishway_ytvis/all_videos' if datatype == 'camera' else '/data/fishway_ytvis/all_videos_mask'
+        
+        # Use strided JSON if stride is specified
+        if stride_value:
+            json_path = f"/data/fishway_ytvis/{json_name}_stride{stride_value}.json"
+            print(f"Registering {dataset_name} with strided JSON: {json_path}")
+        else:
+            json_path = f"/data/fishway_ytvis/{json_name}.json"
+            print(f"Registering {dataset_name} with JSON: {json_path}")
+        
+        register_ytvis_instances(dataset_name, {}, json_path, image_root)
+        registered_datasets.add(dataset_name)
 
     # register_ytvis_instances(
     #     "ytvis_fishway_train",
