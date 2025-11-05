@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Create a stride-adjusted validation JSON file for proper evaluation when using frame stride.
+Create a stride-adjusted JSON file for proper evaluation when using frame stride.
 
-This script creates a new validation JSON file that only includes frames that would be
+This script creates a new JSON file (train or val) that only includes frames that would be
 selected by the frame stride during inference. This ensures that ground truth annotations
 match the predictions frame-for-frame during evaluation.
 """
@@ -13,17 +13,17 @@ import argparse
 from typing import Dict, List, Any
 
 
-def create_stride_adjusted_val_json(
+def create_strided_json(
     input_json_path: str,
     output_json_path: str,
     frame_stride: int,
     verbose: bool = True
 ) -> bool:
     """
-    Create a stride-adjusted validation JSON file.
+    Create a stride-adjusted JSON file.
     
     Args:
-        input_json_path: Path to the original validation JSON file
+        input_json_path: Path to the original JSON file (train or val)
         output_json_path: Path where the stride-adjusted JSON will be saved
         frame_stride: Frame stride value (1 = every frame, 2 = every other frame, etc.)
         verbose: Whether to print progress information
@@ -41,17 +41,17 @@ def create_stride_adjusted_val_json(
         return False
     
     try:
-        # Load the original validation JSON
+        # Load the original JSON
         if verbose:
-            print(f"Loading validation JSON from: {input_json_path}")
+            print(f"Loading JSON from: {input_json_path}")
         with open(input_json_path, 'r') as f:
-            val_data = json.load(f)
+            json_data = json.load(f)
         
         # Create a copy for the stride-adjusted version
         stride_data = {
-            'info': val_data['info'].copy() if 'info' in val_data else {},
-            'licenses': val_data['licenses'].copy() if 'licenses' in val_data else [],
-            'categories': val_data['categories'].copy() if 'categories' in val_data else [],
+            'info': json_data['info'].copy() if 'info' in json_data else {},
+            'licenses': json_data['licenses'].copy() if 'licenses' in json_data else [],
+            'categories': json_data['categories'].copy() if 'categories' in json_data else [],
             'videos': [],
             'annotations': []
         }
@@ -59,7 +59,7 @@ def create_stride_adjusted_val_json(
         # Add metadata about the stride adjustment
         if 'info' not in stride_data:
             stride_data['info'] = {}
-        stride_data['info']['description'] = f"Stride-adjusted validation set (stride={frame_stride})"
+        stride_data['info']['description'] = f"Stride-adjusted set (stride={frame_stride})"
         stride_data['info']['original_json'] = input_json_path
         stride_data['info']['frame_stride'] = frame_stride
         
@@ -69,7 +69,7 @@ def create_stride_adjusted_val_json(
         total_adjusted_annotations = 0
         
         # Process each video
-        for video in val_data['videos']:
+        for video in json_data['videos']:
             video_id = video['id']
             video_length = video['length']
             
@@ -101,14 +101,14 @@ def create_stride_adjusted_val_json(
         
         # Process annotations - only keep annotations for frames that will be used
         video_frame_mapping = {}  # video_id -> set of frame_indices to keep
-        for video in val_data['videos']:
+        for video in json_data['videos']:
             video_id = video['id']
             video_length = video['length']
             selected_frame_indices = set(range(0, video_length, frame_stride))
             video_frame_mapping[video_id] = selected_frame_indices
         
         # Filter annotations
-        for annotation in val_data['annotations']:
+        for annotation in json_data['annotations']:
             video_id = annotation['video_id']
             
             if video_id not in video_frame_mapping:
@@ -166,7 +166,7 @@ def create_stride_adjusted_val_json(
             json.dump(stride_data, f, indent=2)
         
         if verbose:
-            print(f"\n✓ Successfully created stride-adjusted validation JSON:")
+            print(f"\n✓ Successfully created stride-adjusted JSON:")
             print(f"  Original frames: {total_original_frames}")
             print(f"  Adjusted frames: {total_adjusted_frames}")
             print(f"  Frame reduction: {(1 - total_adjusted_frames/total_original_frames)*100:.1f}%")
@@ -178,16 +178,16 @@ def create_stride_adjusted_val_json(
         return True
         
     except Exception as e:
-        print(f"Error creating stride-adjusted validation JSON: {e}")
+        print(f"Error creating stride-adjusted JSON: {e}")
         return False
 
 
-def get_stride_adjusted_json_path(original_json_path: str, frame_stride: int) -> str:
+def get_strided_json_path(original_json_path: str, frame_stride: int) -> str:
     """
     Get the path where the stride-adjusted JSON should be located.
     
     Args:
-        original_json_path: Path to the original validation JSON
+        original_json_path: Path to the original JSON file
         frame_stride: Frame stride value
         
     Returns:
@@ -200,123 +200,10 @@ def get_stride_adjusted_json_path(original_json_path: str, frame_stride: int) ->
     return f"{base_path}_stride{frame_stride}{ext}"
 
 
-def ensure_stride_adjusted_json(
-    original_json_path: str, 
-    frame_stride: int,
-    model_output_dir: str = None,
-    verbose: bool = True
-) -> str:
-    """
-    Ensure that a stride-adjusted validation JSON exists when needed.
-    
-    Args:
-        original_json_path: Path to the original validation JSON
-        frame_stride: Frame stride value from config
-        model_output_dir: Model output directory (only used for initial training, not for copying during eval)
-        verbose: Whether to print progress information
-        
-    Returns:
-        Path to the JSON file that should be used (original or stride-adjusted)
-    """
-    
-    # If stride is 1, no adjustment needed
-    if frame_stride == 1:
-        if verbose:
-            print("Frame stride is 1, using original validation JSON")
-        return original_json_path
-    
-    # Determine where the stride-adjusted JSON should be
-    stride_json_path = get_stride_adjusted_json_path(original_json_path, frame_stride)
-    
-    # Check if stride-adjusted JSON already exists in model directory FIRST
-    # This prevents unnecessary copying during checkpoint evaluations
-    if model_output_dir and os.path.exists(model_output_dir):
-        model_stride_json = os.path.join(model_output_dir, f"val_stride{frame_stride}.json")
-        if os.path.exists(model_stride_json):
-            if verbose:
-                print(f"✓ Using existing stride-adjusted JSON from model directory: {model_stride_json}")
-                print(f"  → This JSON has pre-applied stride {frame_stride}, data loader stride will be set to 1")
-            return model_stride_json
-    
-    # Check if stride-adjusted JSON exists in the data directory
-    if os.path.exists(stride_json_path):
-        if verbose:
-            print(f"✓ Using existing stride-adjusted JSON: {stride_json_path}")
-        
-        # Only copy to model directory during TRAINING (when it doesn't already exist there)
-        # This prevents copying during checkpoint evaluations
-        # Don't copy if the output directory looks like a checkpoint evaluation directory
-        is_checkpoint_eval_dir = (model_output_dir and 
-                                 ('checkpoint_evaluations' in model_output_dir or 
-                                  'checkpoint_' in os.path.basename(model_output_dir)))
-        
-        if (model_output_dir and os.path.exists(model_output_dir) and 
-            not os.path.exists(os.path.join(model_output_dir, f"val_stride{frame_stride}.json")) and
-            not is_checkpoint_eval_dir):
-            model_stride_json = os.path.join(model_output_dir, f"val_stride{frame_stride}.json")
-            try:
-                import shutil
-                shutil.copy2(stride_json_path, model_stride_json)
-                if verbose:
-                    print(f"✓ Copied stride-adjusted JSON to model directory: {model_stride_json}")
-                return model_stride_json
-            except Exception as e:
-                if verbose:
-                    print(f"⚠ Failed to copy to model directory: {e}")
-        elif is_checkpoint_eval_dir and verbose:
-            print("✓ Checkpoint evaluation detected - using existing stride JSON without copying")
-        
-        return stride_json_path
-    
-    # Need to create stride-adjusted JSON
-    if verbose:
-        print(f"Creating stride-adjusted validation JSON (stride={frame_stride})...")
-    
-    success = create_stride_adjusted_val_json(
-        input_json_path=original_json_path,
-        output_json_path=stride_json_path,
-        frame_stride=frame_stride,
-        verbose=verbose
-    )
-    
-    if not success:
-        if verbose:
-            print(f"⚠ Failed to create stride-adjusted JSON, using original: {original_json_path}")
-        return original_json_path
-    
-    if verbose:
-        print(f"✓ Created stride-adjusted JSON: {stride_json_path}")
-    
-    # Copy to model directory if specified and it doesn't already exist
-    # Don't copy if the output directory looks like a checkpoint evaluation directory
-    is_checkpoint_eval_dir = (model_output_dir and 
-                             ('checkpoint_evaluations' in model_output_dir or 
-                              'checkpoint_' in os.path.basename(model_output_dir)))
-    
-    if (model_output_dir and os.path.exists(model_output_dir) and 
-        not os.path.exists(os.path.join(model_output_dir, f"val_stride{frame_stride}.json")) and
-        not is_checkpoint_eval_dir):
-        model_stride_json = os.path.join(model_output_dir, f"val_stride{frame_stride}.json")
-        try:
-            import shutil
-            shutil.copy2(stride_json_path, model_stride_json)
-            if verbose:
-                print(f"✓ Copied stride-adjusted JSON to model directory: {model_stride_json}")
-            return model_stride_json
-        except Exception as e:
-            if verbose:
-                print(f"⚠ Failed to copy to model directory: {e}")
-    elif is_checkpoint_eval_dir and verbose:
-        print("✓ Checkpoint evaluation detected - using stride JSON without copying")
-    
-    return stride_json_path
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Create stride-adjusted validation JSON")
-    parser.add_argument('--input-json', type=str, 
-                       default='/data/fishway_ytvis/val.json',
-                       help='Input validation JSON file')
+    parser = argparse.ArgumentParser(description="Create stride-adjusted JSON file (train or val)")
+    parser.add_argument('--input-json', type=str, required=True,
+                       help='Input JSON file (train or val)')
     parser.add_argument('--output-json', type=str,
                        help='Output stride-adjusted JSON file (default: input_json with _stride{N} suffix)')
     parser.add_argument('--frame-stride', type=int, required=True,
@@ -324,47 +211,29 @@ def main():
     parser.add_argument('--verbose', action='store_true', default=True,
                        help='Print progress information')
     
-    # Support for ensure mode
-    parser.add_argument('--ensure', action='store_true',
-                       help='Ensure stride-adjusted JSON exists (create only if needed)')
-    parser.add_argument('--model-dir', type=str,
-                       help='Model output directory (for ensure mode)')
-    
     args = parser.parse_args()
     
-    if args.ensure:
-        # Use ensure mode
-        result_path = ensure_stride_adjusted_json(
-            original_json_path=args.input_json,
-            frame_stride=args.frame_stride,
-            model_output_dir=args.model_dir,
-            verbose=args.verbose
-        )
-        print(f"\nResult: Use JSON file at {result_path}")
+    # Generate output filename if not provided
+    if not args.output_json:
+        args.output_json = get_strided_json_path(args.input_json, args.frame_stride)
+    
+    print(f"Creating stride-adjusted JSON:")
+    print(f"  Input: {args.input_json}")
+    print(f"  Output: {args.output_json}")
+    print(f"  Frame stride: {args.frame_stride}")
+    
+    success = create_strided_json(
+        args.input_json,
+        args.output_json,
+        args.frame_stride,
+        args.verbose
+    )
+    
+    if success:
+        print(f"\n✓ Success! Stride-adjusted JSON created at: {args.output_json}")
     else:
-        # Use create mode (original functionality)
-        # Generate output filename if not provided
-        if not args.output_json:
-            base_path, ext = os.path.splitext(args.input_json)
-            args.output_json = f"{base_path}_stride{args.frame_stride}{ext}"
-        
-        print(f"Creating stride-adjusted validation JSON:")
-        print(f"  Input: {args.input_json}")
-        print(f"  Output: {args.output_json}")
-        print(f"  Frame stride: {args.frame_stride}")
-        
-        success = create_stride_adjusted_val_json(
-            args.input_json,
-            args.output_json,
-            args.frame_stride,
-            args.verbose
-        )
-        
-        if success:
-            print(f"\n✓ Success! Stride-adjusted validation JSON created at: {args.output_json}")
-        else:
-            print("\n✗ Failed to create stride-adjusted validation JSON")
-            exit(1)
+        print("\n✗ Failed to create stride-adjusted JSON")
+        exit(1)
 
 
 if __name__ == "__main__":
