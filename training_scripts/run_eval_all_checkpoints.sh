@@ -411,10 +411,91 @@ source /home/simone/.venv/bin/activate
 # Set environment variables
 export DETECTRON2_DATASETS=/data
 
-# If a model-local validation JSON exists, enforce its use
-if [ -f "$MODEL_DIR/val.json" ]; then
-    export VAL_JSON_OVERRIDE="$MODEL_DIR/val.json"
-    echo "Using model-local validation JSON: $VAL_JSON_OVERRIDE"
+# Check for model-local validation JSON files (including strided versions)
+# Parse config to detect stride patterns in dataset names
+if [ -f "$CONFIG_FILE" ]; then
+    # Use python to parse YAML and detect stride patterns
+    VAL_JSON_RESULT=$(CONFIG_FILE="$CONFIG_FILE" MODEL_DIR="$MODEL_DIR" python3 <<PYTHON_SCRIPT
+import yaml
+import os
+import re
+import sys
+
+config_file = os.environ['CONFIG_FILE']
+model_dir = os.environ['MODEL_DIR']
+
+try:
+    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    test_datasets = config.get('DATASETS', {}).get('TEST', [])
+    
+    def get_json_path_from_dataset(dataset_name):
+        stride_match = re.search(r'_stride(\d+)$', dataset_name)
+        if 'val' in dataset_name:
+            if stride_match:
+                stride_value = stride_match.group(1)
+                return f"{model_dir}/val_stride{stride_value}.json"
+            else:
+                return f"{model_dir}/val.json"
+        return None
+    
+    # Check for val JSON files based on dataset names
+    expected_json = None
+    for dataset in test_datasets:
+        json_path = get_json_path_from_dataset(dataset)
+        if json_path:
+            expected_json = json_path
+            if os.path.exists(json_path):
+                print(f"FOUND:{json_path}")
+                sys.exit(0)
+    
+    # If we get here, the expected JSON file was not found
+    if expected_json:
+        print(f"NOT_FOUND:{expected_json}")
+        sys.exit(1)
+    else:
+        print("NO_VAL_DATASET")
+        sys.exit(1)
+except Exception as e:
+    print(f"ERROR:{str(e)}")
+    sys.exit(1)
+
+PYTHON_SCRIPT
+    )
+    
+    PYTHON_EXIT_CODE=$?
+    
+    if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+        if echo "$VAL_JSON_RESULT" | grep -q "^NOT_FOUND:"; then
+            EXPECTED_JSON=$(echo "$VAL_JSON_RESULT" | sed 's/^NOT_FOUND://')
+            echo "Error: Required validation JSON file not found: $EXPECTED_JSON"
+            echo "Please ensure the correct JSON file exists in the model directory."
+            echo "If using a stride dataset, make sure the corresponding strided JSON file was copied during training."
+            exit 1
+        elif echo "$VAL_JSON_RESULT" | grep -q "^ERROR:"; then
+            ERROR_MSG=$(echo "$VAL_JSON_RESULT" | sed 's/^ERROR://')
+            echo "Error: Failed to parse config file: $ERROR_MSG"
+            exit 1
+        else
+            echo "Error: Failed to determine required validation JSON file from config."
+            exit 1
+        fi
+    fi
+    
+    if echo "$VAL_JSON_RESULT" | grep -q "^FOUND:"; then
+        VAL_JSON_INFO=$(echo "$VAL_JSON_RESULT" | sed 's/^FOUND://')
+        if [ -f "$VAL_JSON_INFO" ]; then
+            export VAL_JSON_OVERRIDE="$VAL_JSON_INFO"
+            echo "Using model-local validation JSON: $VAL_JSON_OVERRIDE"
+        else
+            echo "Error: Validation JSON file not found: $VAL_JSON_INFO"
+            exit 1
+        fi
+    else
+        echo "Error: Could not determine validation JSON file from config."
+        exit 1
+    fi
 fi
 
 # Set CUDA_VISIBLE_DEVICES to the specified device
