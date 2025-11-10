@@ -326,6 +326,9 @@ for key in "${!config_changes[@]}"; do
     esac
 done
 
+# Initialize flag for reusing existing run
+REUSE_EXISTING_RUN=false
+
 # Determine output directory structure
 if [ ${#config_changes[@]} -eq 0 ]; then
     # No changes, use simple structure
@@ -347,6 +350,7 @@ else
                     echo "Rerunning evaluation with same configuration..."
                     FINAL_OUTPUT_DIR="$OUTPUT_DIR"
                     RUN_NUM=""
+                    REUSE_EXISTING_RUN=true
                 else
                     echo "Evaluation cancelled."
                     rm "$TEMP_CONFIG"
@@ -365,9 +369,32 @@ else
                 FINAL_OUTPUT_DIR="$OUTPUT_DIR/run_$RUN_NUM"
             fi
         else
-            # Already has run structure, check all runs
-            RUN_NUM=$(find_next_run "$OUTPUT_DIR")
-            FINAL_OUTPUT_DIR="$OUTPUT_DIR/run_$RUN_NUM"
+            # Already has run structure, check all runs for matching config
+            MATCHING_RUN=""
+            REUSE_EXISTING_RUN=false
+            for existing_run in "$OUTPUT_DIR"/run_*; do
+                if [ -d "$existing_run" ]; then
+                    existing_config="$existing_run/config.yaml"
+                    if [ -f "$existing_config" ] && compare_configs "$TEMP_CONFIG" "$existing_config"; then
+                        MATCHING_RUN=$(basename "$existing_run")
+                        REUSE_EXISTING_RUN=true
+                        break
+                    fi
+                fi
+            done
+            
+            if [ -n "$MATCHING_RUN" ]; then
+                echo "Configuration matches existing evaluation in $MATCHING_RUN."
+                echo "Will reuse $MATCHING_RUN and skip existing checkpoints."
+                RUN_NUM=$(echo "$MATCHING_RUN" | sed 's/run_//')
+                FINAL_OUTPUT_DIR="$OUTPUT_DIR/$MATCHING_RUN"
+            else
+                # Config differs from all existing runs, create new run
+                RUN_NUM=$(find_next_run "$OUTPUT_DIR")
+                echo "Configuration differs from all existing evaluations."
+                echo "Creating new run_$RUN_NUM/"
+                FINAL_OUTPUT_DIR="$OUTPUT_DIR/run_$RUN_NUM"
+            fi
         fi
     else
         # No existing evaluations, use simple structure
@@ -527,8 +554,8 @@ if [ -n "$CHECKPOINT_RANGE" ]; then
     EVAL_CMD="$EVAL_CMD --checkpoint-range \"$CHECKPOINT_RANGE\""
 fi
 
-# Add skip-existing unless it's a new run with different config
-if [ -z "$RUN_NUM" ]; then
+# Add skip-existing if reusing existing run or no config changes
+if [ -z "$RUN_NUM" ] || [ "$REUSE_EXISTING_RUN" = true ]; then
     EVAL_CMD="$EVAL_CMD --skip-existing"
 fi
 
