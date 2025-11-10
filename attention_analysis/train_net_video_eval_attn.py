@@ -207,7 +207,7 @@ def setup(args):
         register_ytvis_instances(
             "ytvis_fishway_val_camera",
             {},
-            "/data/fishway_ytvis/val_5fish.json",
+            "/data/fishway_ytvis/val_vid_66.json",
             "/data/fishway_ytvis/all_videos"
         )
     elif datatype == 'silhouette':
@@ -215,7 +215,7 @@ def setup(args):
         register_ytvis_instances(
             "ytvis_fishway_val_silhouette",
             {},
-            "/data/fishway_ytvis/val_5fish.json",
+            "/data/fishway_ytvis/val_vid_66.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
     else:
@@ -224,13 +224,13 @@ def setup(args):
         register_ytvis_instances(
             "ytvis_fishway_val_camera",
             {},
-            "/data/fishway_ytvis/val_5fish.json",
+            "/data/fishway_ytvis/val_vid_66.json",
             "/data/fishway_ytvis/all_videos"
         )
         register_ytvis_instances(
             "ytvis_fishway_val_silhouette",
             {},
-            "/data/fishway_ytvis/val_5fish.json",
+            "/data/fishway_ytvis/val_vid_66.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
 
@@ -277,7 +277,13 @@ def main(args):
             global ATTENTION_EXTRACTOR
             from temporal_ytvis_eval import TemporalYTVISEvaluator  # ensure import for hooks
             # Create the extractor using the model already built and loaded
-            ATTENTION_EXTRACTOR = AttentionExtractor(model, cfg.OUTPUT_DIR)
+            # Enable save_immediately_from_hook to prevent RAM accumulation
+            ATTENTION_EXTRACTOR = AttentionExtractor(
+                model, 
+                cfg.OUTPUT_DIR,
+                save_immediately_from_hook=True,  # Save directly from hook, no accumulation
+                window_size=cfg.MODEL.MASK_FORMER.TEST.WINDOW_SIZE  # Pass window_size from config
+            )
         except Exception as e:
             print(f"[WARN] Attention extractor could not be initialized: {e}")
         res = Trainer.test(cfg, model)
