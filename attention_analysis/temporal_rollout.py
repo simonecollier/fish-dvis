@@ -1,9 +1,9 @@
 import os
 import json
 import argparse
+import glob
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 def load_results_temporal(run_dir):
@@ -30,13 +30,38 @@ def pick_top_predictions_by_video(predictions):
 
 
 def load_attention_for_video(run_dir, video_id):
-    """Load attention maps npz and metadata for a video."""
-    inf_dir = os.path.join(run_dir, "inference")
-    attn_dir = os.path.join(inf_dir, "attention_maps")
-    npz_path = os.path.join(attn_dir, f"video_{video_id}.npz")
-    meta_path = os.path.join(attn_dir, f"video_{video_id}.meta.json")
-    if not os.path.exists(npz_path) or not os.path.exists(meta_path):
-        raise FileNotFoundError(f"Missing attention files for video {video_id}: {npz_path}, {meta_path}")
+    """Load attention maps npz and metadata for a video.
+    
+    Looks for files matching pattern: video_{video_id}_*temporal_refiner_attn.npz
+    in the attention_maps directory (not inference/attention_maps).
+    """
+    # Try both locations: attention_maps/ and inference/attention_maps/
+    attn_dir1 = os.path.join(run_dir, "attention_maps")
+    attn_dir2 = os.path.join(run_dir, "inference", "attention_maps")
+    
+    # Search for files matching the pattern
+    npz_patterns = [
+        os.path.join(attn_dir1, f"video_{video_id}_*temporal_refiner_attn.npz"),
+        os.path.join(attn_dir2, f"video_{video_id}_*temporal_refiner_attn.npz"),
+        os.path.join(attn_dir1, f"video_{video_id}.npz"),  # Fallback to simple pattern
+        os.path.join(attn_dir2, f"video_{video_id}.npz"),  # Fallback to simple pattern
+    ]
+    
+    npz_path = None
+    for pattern in npz_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            npz_path = matches[0]  # Use first match
+            break
+    
+    if npz_path is None:
+        raise FileNotFoundError(f"Could not find attention npz file for video {video_id} in {attn_dir1} or {attn_dir2}")
+    
+    # Find corresponding meta.json file
+    meta_path = npz_path.replace(".npz", ".meta.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(f"Could not find metadata file for video {video_id}: {meta_path}")
+    
     arrays = np.load(npz_path)
     with open(meta_path, "r") as f:
         meta = json.load(f)
@@ -94,15 +119,23 @@ def get_all_layers_sorted(meta):
     # Sort layers by natural order in name if possible
     def layer_sort_key(name):
         import re
-        m = re.search(r"self_attention_layers\.(\d+)", name)
+        # Match patterns like "self_attention_layers.0" or "transformer_time_self_attention_layers.0"
+        m = re.search(r"(?:transformer_time_)?self_attention_layers\.(\d+)", name)
         return int(m.group(1)) if m else 1e9
     
     sorted_layers = sorted(layer_to_keys.keys(), key=layer_sort_key)
     return sorted_layers, layer_to_keys
 
 
+def normalize_rows(matrix):
+    """Row normalize a matrix so each row sums to 1.0."""
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)  # Avoid division by zero
+    return matrix / row_sums
+
+
 def compute_rollout(run_dir, video_id, refiner_id):
-    """Compute attention rollout: T_6 * T_5 * ... * T_0 where T_i = A_i + I."""
+    """Compute attention rollout: T_6 * T_5 * ... * T_0 where T_i = normalize_rows(A_i + I)."""
     arrays, meta = load_attention_for_video(run_dir, video_id)
     sorted_layers, layer_to_keys = get_all_layers_sorted(meta)
     
@@ -155,11 +188,12 @@ def compute_rollout(run_dir, video_id, refiner_id):
     
     T, _ = attention_matrices[0].shape
     
-    # Compute T_i = A_i + I for each layer
+    # Compute T_i = normalize_rows(A_i + I) for each layer
     identity = np.eye(T)
     transformed = []
     for i, A_i in enumerate(attention_matrices):
         T_i = A_i + identity
+        T_i = normalize_rows(T_i)  # Row normalize after adding identity
         transformed.append(T_i)
     
     # Multiply matrices in order: T_6 * T_5 * ... * T_0 (or last * ... * first)
@@ -171,100 +205,18 @@ def compute_rollout(run_dir, video_id, refiner_id):
     return rollout, layer_names, attention_matrices, transformed
 
 
-def plot_rollout(run_dir, video_id, refiner_id, rollout, layer_names, attention_matrices, transformed, out_plot_dir, out_maps_dir):
-    """Plot the rollout result and save matrices to attention_maps."""
-    T, _ = rollout.shape
-    
-    os.makedirs(out_plot_dir, exist_ok=True)
-    os.makedirs(out_maps_dir, exist_ok=True)
-    
-    # Plot rollout result
-    fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-    im = ax.imshow(rollout, cmap='viridis', aspect='equal')
-    ax.set_title(f'Rollout (T_6 * ... * T_0)\nVideo {video_id}, Refiner ID {refiner_id}', fontsize=10)
-    ax.set_xlabel('Frame')
-    ax.set_ylabel('Frame')
-    ax.set_box_aspect(1)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    
-    out_path = os.path.join(out_plot_dir, f"video_{video_id}_refiner_{refiner_id}_rollout.png")
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Saved rollout plot to {out_path}")
-
-    # Row-normalized rollout (each row min-max scaled to [0,1])
-    rmin = rollout.min(axis=1, keepdims=True)
-    rmax = rollout.max(axis=1, keepdims=True)
-    denom = np.where((rmax - rmin) == 0, 1.0, (rmax - rmin))
-    rollout_norm = (rollout - rmin) / denom
-
-    fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-    im = ax.imshow(rollout_norm, cmap='viridis', aspect='equal')
-    ax.set_title(f'Rollout Row-Normalized\nVideo {video_id}, Refiner ID {refiner_id}', fontsize=10)
-    ax.set_xlabel('Frame')
-    ax.set_ylabel('Frame')
-    ax.set_box_aspect(1)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    out_path_norm = os.path.join(out_plot_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm.png")
-    plt.savefig(out_path_norm, dpi=150, bbox_inches='tight')
-    plt.close()
-
-    # Save normalized matrix
-    rollout_path_norm = os.path.join(out_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm.npz")
-    np.savez_compressed(rollout_path_norm, rollout_rownorm=rollout_norm)
-    print(f"Saved row-normalized rollout plot to {out_path_norm}")
-
-    # Save column averages of the row-normalized rollout (mean over rows for each column)
-    col_avg = rollout_norm.mean(axis=0)
-    colavg_npz_path = os.path.join(out_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg.npz")
-    np.savez_compressed(colavg_npz_path, rollout_rownorm_colavg=col_avg)
-    # Also save as CSV for convenience
-    colavg_csv_path = os.path.join(out_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg.csv")
-    try:
-        import csv
-        with open(colavg_csv_path, 'w', newline='') as cf:
-            writer = csv.writer(cf)
-            writer.writerow(["column_index", "mean_value"])
-            for idx, val in enumerate(col_avg):
-                writer.writerow([idx, float(val)])
-    except Exception:
-        pass
-
-    # Min-max normalize the column averages to [0, 1]
-    cav_min = float(col_avg.min()) if col_avg.size > 0 else 0.0
-    cav_max = float(col_avg.max()) if col_avg.size > 0 else 1.0
-    cav_denom = (cav_max - cav_min) if (cav_max - cav_min) != 0 else 1.0
-    col_avg_norm = (col_avg - cav_min) / cav_denom
-
-    colavg_norm_npz_path = os.path.join(out_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg_norm.npz")
-    np.savez_compressed(colavg_norm_npz_path, rollout_rownorm_colavg_norm=col_avg_norm)
-
-    colavg_norm_csv_path = os.path.join(out_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg_norm.csv")
-    try:
-        import csv
-        with open(colavg_norm_csv_path, 'w', newline='') as cf:
-            writer = csv.writer(cf)
-            writer.writerow(["column_index", "mean_value_norm"])
-            for idx, val in enumerate(col_avg_norm):
-                writer.writerow([idx, float(val)])
-    except Exception:
-        pass
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Compute and plot temporal attention rollout")
+    parser = argparse.ArgumentParser(description="Compute temporal attention rollout")
     parser.add_argument("run_dir", help="Evaluation run directory (contains inference/results_temporal.json)")
     parser.add_argument("--out", dest="out_dir", default=None, help="Optional override for base output directory (default: <run_dir>)")
     args = parser.parse_args()
     
     run_dir = args.run_dir
     base_dir = args.out_dir or run_dir
-    # Per request: plots -> inference/attention_plots, matrices -> inference/attention_maps
-    out_plot_dir = os.path.join(base_dir, "inference", "attention_plots")
-    out_maps_dir = os.path.join(base_dir, "inference", "attention_maps")
+    # Save to attention_maps/rolled_out/ (not inference/attention_maps/)
+    attn_maps_dir = os.path.join(base_dir, "attention_maps")
+    out_maps_dir = os.path.join(attn_maps_dir, "rolled_out")
+    os.makedirs(out_maps_dir, exist_ok=True)
     
     predictions = load_results_temporal(run_dir)
     top_by_video = pick_top_predictions_by_video(predictions)
@@ -276,9 +228,8 @@ def main():
         refiner_id = int(pred["refiner_id"])
         try:
             rollout, layer_names, attention_matrices, transformed = compute_rollout(run_dir, vid, refiner_id)
-            plot_rollout(run_dir, vid, refiner_id, rollout, layer_names, attention_matrices, transformed, out_plot_dir, out_maps_dir)
             
-            # Also save rollout matrix as npz
+            # Save rollout matrix as npz
             rollout_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout.npz")
             np.savez_compressed(rollout_path, rollout=rollout)
             print(f"Saved rollout matrix to {rollout_path}")
