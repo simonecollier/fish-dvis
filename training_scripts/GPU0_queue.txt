@@ -1,0 +1,14 @@
+# GPU Queue File
+# This file contains commands to be executed sequentially on a single GPU
+# One command per line
+# Lines starting with # are ignored (comments)
+# Empty lines are also ignored
+
+# Model evaluation:
+
+bash /home/simone/fish-dvis/training_scripts/run_eval_all_checkpoints.sh /home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_240_115 --window-size 100
+
+bash /home/simone/fish-dvis/training_scripts/run_eval_all_checkpoints.sh /home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_320_71 --window-size 64
+
+
+
