@@ -40,13 +40,16 @@ def parse_filename(filename):
     """
     Parse filename to extract video_id, frame range, and layer index.
     
-    Example: "video_66_frames0-30_layer_backbone_vit_module_blocks_0_attn.npz"
-    or: "video_66_frames0-30_layer_backbone_vit_module_blocks_0_attn_collapsed.npz"
+    Supports both old and new naming formats:
+    - Old: "video_66_frames0-30_layer_backbone_vit_module_blocks_0_attn.npz"
+    - New: "video_66_frames0-30_backbone_vit_layer_0_attn.npz"
+    - Also supports: "video_66_frames0-30_layer_backbone_vit_module_blocks_0_attn_collapsed.npz"
+    
     Returns: (video_id, frame_start, frame_end, layer_idx)
     """
-    # Pattern: video_<id>_frames<start>-<end>_layer_backbone_vit_module_blocks_<layer>_attn[.npz or _collapsed.npz]
-    pattern = r'video_(\d+)_frames(\d+)-(\d+)_layer_backbone_vit_module_blocks_(\d+)_attn(?:|_collapsed)\.npz'
-    match = re.match(pattern, filename)
+    # Try new format first: video_<id>_frames<start>-<end>_backbone_vit_layer_<layer>_attn[.npz or _collapsed.npz]
+    new_pattern = r'video_(\d+)_frames(\d+)-(\d+)_backbone_vit_layer_(\d+)_attn(?:|_collapsed)\.npz'
+    match = re.match(new_pattern, filename)
     
     if match:
         video_id = int(match.group(1))
@@ -54,8 +57,19 @@ def parse_filename(filename):
         frame_end = int(match.group(3))
         layer_idx = int(match.group(4))
         return video_id, frame_start, frame_end, layer_idx
-    else:
-        return None
+    
+    # Try old format: video_<id>_frames<start>-<end>_layer_backbone_vit_module_blocks_<layer>_attn[.npz or _collapsed.npz]
+    old_pattern = r'video_(\d+)_frames(\d+)-(\d+)_layer_backbone_vit_module_blocks_(\d+)_attn(?:|_collapsed)\.npz'
+    match = re.match(old_pattern, filename)
+    
+    if match:
+        video_id = int(match.group(1))
+        frame_start = int(match.group(2))
+        frame_end = int(match.group(3))
+        layer_idx = int(match.group(4))
+        return video_id, frame_start, frame_end, layer_idx
+    
+    return None
 
 
 def group_files_by_video_and_frames(spatial_files):
@@ -158,11 +172,6 @@ def rollout_across_layers(layer_attentions, num_layers=24):
             # This builds up: A_0, then A_1 @ A_0, ..., finally A_23 @ ... @ A_1 @ A_0
             result = attn_rolled @ result
         
-        # Row normalize the final result
-        row_sums = result.sum(axis=1, keepdims=True)
-        row_sums = np.where(row_sums == 0, 1.0, row_sums)
-        result /= row_sums
-        
         final_attn[frame_idx] = result
     
     return final_attn
@@ -178,7 +187,7 @@ def process_window(group_files, attention_maps_dir, num_layers=24):
         num_layers: Expected number of layers (default 24)
     
     Returns:
-        True if successful, False otherwise
+        video_id, frame_start, frame_end
     """
     video_id, frame_start, frame_end = None, None, None
     
@@ -237,23 +246,17 @@ def process_window(group_files, attention_maps_dir, num_layers=24):
     # Free memory from layer attentions
     del layer_attentions
     
-    # Verify rows sum to 1
-    all_rows_sum_to_one = True
-    for frame_idx in range(final_attn.shape[0]):
-        row_sums = final_attn[frame_idx].sum(axis=1)
-        if not np.allclose(row_sums, 1.0, atol=1e-5):
-            all_rows_sum_to_one = False
-            break
-    
-    # Save the rolled out attention maps
+    # Save the rolled out attention maps in rolled_out subdirectory
+    rolled_out_dir = os.path.join(attention_maps_dir, "rolled_out")
+    os.makedirs(rolled_out_dir, exist_ok=True)
     output_filename = f"video_{video_id}_frames{frame_start}-{frame_end}_backbone_vit_rolled_out.npz"
-    output_path = os.path.join(attention_maps_dir, output_filename)
+    output_path = os.path.join(rolled_out_dir, output_filename)
     np.savez_compressed(output_path, attention_weights=final_attn)
     
     # Free memory
     del final_attn
     
-    return video_id, frame_start, frame_end, all_rows_sum_to_one
+    return video_id, frame_start, frame_end
 
 
 def process_directory(directory):
@@ -282,16 +285,17 @@ def process_directory(directory):
     print()
     
     # Find all original .npz files (raw or collapsed)
+    # Support both old and new naming formats
     original_files = []
     for filename in os.listdir(attention_maps_dir):
         if (filename.endswith('.npz') and 
-            'layer_backbone_vit_module_blocks' in filename and 
+            ('backbone_vit_layer' in filename or 'layer_backbone_vit_module_blocks' in filename) and 
             '_collapsed' not in filename and
             '_rolled_out' not in filename):
             original_files.append(os.path.join(attention_maps_dir, filename))
     
     if len(original_files) == 0:
-        print(f"No original spatial attention maps found (files with 'layer_backbone_vit_module_blocks' in name)")
+        print(f"No original spatial attention maps found (files with 'backbone_vit_layer' or 'layer_backbone_vit_module_blocks' in name)")
         return
     
     print(f"Found {len(original_files)} spatial attention map file(s)")
@@ -321,7 +325,7 @@ def process_directory(directory):
                 continue
             
             # Process window: load, collapse, rollout, save
-            window_video_id, frame_start, frame_end, all_rows_sum_to_one = process_window(
+            window_video_id, frame_start, frame_end = process_window(
                 group_files, attention_maps_dir, num_layers=24
             )
             
@@ -333,13 +337,9 @@ def process_directory(directory):
             
             print(f"  Rolled out across layers -> shape (num_frames, num_patches, num_patches)")
             
-            if all_rows_sum_to_one:
-                print(f"  ✓ All rows sum to 1 for all frames")
-            else:
-                print(f"  ✗ WARNING: Some rows do not sum to 1")
-            
+            rolled_out_dir = os.path.join(attention_maps_dir, "rolled_out")
             output_filename = f"video_{window_video_id}_frames{frame_start}-{frame_end}_backbone_vit_rolled_out.npz"
-            window_file_path = os.path.join(attention_maps_dir, output_filename)
+            window_file_path = os.path.join(rolled_out_dir, output_filename)
             window_files.append((window_file_path, frame_start, frame_end))
             print(f"  Saved rolled out attention maps to {output_filename}")
             
@@ -381,9 +381,11 @@ def process_directory(directory):
             combined_attn = np.concatenate(all_attentions, axis=0)
             print(f"  Combined shape: {combined_attn.shape}")
             
-            # Save combined file
+            # Save combined file in rolled_out subdirectory
+            rolled_out_dir = os.path.join(attention_maps_dir, "rolled_out")
+            os.makedirs(rolled_out_dir, exist_ok=True)
             combined_filename = f"video_{video_id}_backbone_vit_rolled_out.npz"
-            combined_path = os.path.join(attention_maps_dir, combined_filename)
+            combined_path = os.path.join(rolled_out_dir, combined_filename)
             np.savez_compressed(combined_path, attention_weights=combined_attn)
             print(f"  Saved combined file: {combined_filename}")
             print()
