@@ -6,6 +6,59 @@ from pathlib import Path
 from collections import defaultdict
 
 
+def remove_cls_token(attn_weights):
+    """
+    Remove CLS token from attention matrices by removing first row and first column,
+    then row-normalize so each row sums to 1.0.
+    
+    In ViT backbones, the CLS token is prepended at index 0, so it occupies:
+    - First row (index 0) of the attention matrix
+    - First column (index 0) of the attention matrix
+    
+    After removing the CLS token column, the remaining rows no longer sum to 1.0
+    (since we removed the attention weight allocated to the CLS token). This function
+    re-normalizes each row so they sum to 1.0 again.
+    
+    Args:
+        attn_weights: Attention weights with shape:
+            - [num_frames, num_heads, num_patches, num_patches] (4D, with heads)
+            - [num_frames, num_patches, num_patches] (3D, heads already collapsed)
+    
+    Returns:
+        Attention weights with CLS token removed and row-normalized, shape:
+            - [num_frames, num_heads, num_patches-1, num_patches-1] (4D)
+            - [num_frames, num_patches-1, num_patches-1] (3D)
+    """
+    if len(attn_weights.shape) == 4:
+        # Shape: [num_frames, num_heads, num_patches, num_patches]
+        # Remove first row and first column (CLS token at index 0)
+        attn_no_cls = attn_weights[:, :, 1:, 1:]
+        
+        # Row normalize: for each frame, head, and row, divide by row sum
+        # Sum over last dimension (columns) for each row
+        row_sums = attn_no_cls.sum(axis=-1, keepdims=True)  # Shape: [num_frames, num_heads, num_patches-1, 1]
+        # Avoid division by zero
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        attn_normalized = attn_no_cls / row_sums
+        
+        return attn_normalized
+    elif len(attn_weights.shape) == 3:
+        # Shape: [num_frames, num_patches, num_patches]
+        # Remove first row and first column (CLS token at index 0)
+        attn_no_cls = attn_weights[:, 1:, 1:]
+        
+        # Row normalize: for each frame and row, divide by row sum
+        # Sum over last dimension (columns) for each row
+        row_sums = attn_no_cls.sum(axis=-1, keepdims=True)  # Shape: [num_frames, num_patches-1, 1]
+        # Avoid division by zero
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        attn_normalized = attn_no_cls / row_sums
+        
+        return attn_normalized
+    else:
+        raise ValueError(f"Expected 3D or 4D array, got shape {attn_weights.shape}")
+
+
 def simulate_residual_connection(attn_matrix):
     """
     Simulate residual connection by adding identity matrix and row normalize.
@@ -123,6 +176,104 @@ def collapse_heads_in_memory(attn_weights):
     return np.mean(attn_weights, axis=1)
 
 
+def collapse_heads_with_weights(attn_weights, weights):
+    """
+    Collapse the num_heads dimension by weighted sum using entropy-based weights.
+    
+    For each frame, computes: weighted_attn[frame] = sum_head(weights[frame, head] * attn_weights[frame, head, :, :])
+    
+    Args:
+        attn_weights: Attention weights with shape [num_frames, num_heads, num_patches, num_patches]
+        weights: Weights with shape [num_frames, num_heads] (e.g., from compute_attention_head_entropy)
+                 Should sum to 1.0 across heads for each frame
+    
+    Returns:
+        Weighted attention map with shape [num_frames, num_patches, num_patches]
+    """
+    if len(attn_weights.shape) != 4:
+        raise ValueError(f"Expected 4D array [num_frames, num_heads, num_patches, num_patches], got shape {attn_weights.shape}")
+    
+    if len(weights.shape) != 2:
+        raise ValueError(f"Expected 2D array [num_frames, num_heads], got shape {weights.shape}")
+    
+    if attn_weights.shape[:2] != weights.shape:
+        raise ValueError(f"Shape mismatch: attn_weights has shape {attn_weights.shape[:2]}, weights has shape {weights.shape}")
+    
+    # Weighted sum: for each frame, sum over heads with weights
+    # weights[:, :, None, None] expands to [num_frames, num_heads, 1, 1] for broadcasting
+    weighted_attn = np.sum(attn_weights * weights[:, :, None, None], axis=1)
+    
+    return weighted_attn
+
+
+def compute_attention_head_entropy(attn_weights, remove_cls=True):
+    """
+    Compute entropy for each attention head and convert to weights using softmax(-entropy).
+    
+    For each (frame, head) combination:
+    1. Compute row-wise entropy: for each row i, entropy_i = -sum_j(a_ij * log(a_ij))
+       where a_ij is the attention weight at row i, column j (treating 0 * log(0) = 0)
+    2. Average across all rows to get the entropy for that head
+    3. Apply softmax(-entropy) across heads for each frame to get weights
+    
+    Args:
+        attn_weights: Attention weights with shape [num_frames, num_heads, num_patches, num_patches]
+                     Rows should already be normalized (sum to 1.0)
+        remove_cls: If True, remove CLS token (first row and column) before computation
+    
+    Returns:
+        entropy: Array with shape [num_frames, num_heads] containing entropy for each head
+        weights: Array with shape [num_frames, num_heads] containing softmax(-entropy) weights
+                 (normalized so each frame sums to 1.0 across heads)
+    """
+    if len(attn_weights.shape) != 4:
+        raise ValueError(f"Expected 4D array [num_frames, num_heads, num_patches, num_patches], got shape {attn_weights.shape}")
+    
+    num_frames, num_heads, num_patches, _ = attn_weights.shape
+    
+    # Optionally remove CLS token
+    if remove_cls:
+        attn_weights = attn_weights[:, :, 1:, 1:]  # Remove first row and column
+        num_patches = num_patches - 1
+    
+    # Ensure rows are normalized (should already be, but be safe)
+    row_sums = attn_weights.sum(axis=-1, keepdims=True)  # Shape: [num_frames, num_heads, num_patches, 1]
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)
+    attn_normalized = attn_weights / row_sums
+    
+    # Compute entropy for each (frame, head)
+    # For each row i: entropy_i = -sum_j(a_ij * log(a_ij))
+    # We'll compute this for all rows at once using vectorized operations
+    
+    # Compute log of attention weights, handling zeros (0 * log(0) = 0)
+    # Use np.log with small epsilon to avoid log(0), then multiply by attn_normalized
+    # This automatically handles the 0 * log(0) = 0 case
+    epsilon = 1e-10
+    log_attn = np.log(attn_normalized + epsilon)  # Shape: [num_frames, num_heads, num_patches, num_patches]
+    
+    # Compute -a_ij * log(a_ij) for all i, j
+    entropy_per_row = -attn_normalized * log_attn  # Shape: [num_frames, num_heads, num_patches, num_patches]
+    
+    # Sum over columns (axis=-1) to get entropy for each row
+    # Shape: [num_frames, num_heads, num_patches]
+    row_entropies = entropy_per_row.sum(axis=-1)
+    
+    # Average across rows (axis=-1) to get entropy for each head
+    # Shape: [num_frames, num_heads]
+    entropy = row_entropies.mean(axis=-1)
+    
+    # Compute weights using softmax(-entropy) across heads for each frame
+    # softmax(-entropy) = exp(-entropy) / sum(exp(-entropy))
+    # Use log-sum-exp trick for numerical stability
+    neg_entropy = -entropy  # Shape: [num_frames, num_heads]
+    # Subtract max for numerical stability
+    neg_entropy_shifted = neg_entropy - neg_entropy.max(axis=-1, keepdims=True)
+    exp_neg_entropy = np.exp(neg_entropy_shifted)
+    weights = exp_neg_entropy / exp_neg_entropy.sum(axis=-1, keepdims=True)
+    
+    return entropy, weights
+
+
 def rollout_across_layers(layer_attentions, num_layers=24):
     """
     Rollout attention maps across layers by multiplying them in order.
@@ -179,7 +330,10 @@ def rollout_across_layers(layer_attentions, num_layers=24):
 
 def process_window(group_files, attention_maps_dir, num_layers=24):
     """
-    Process a single window (frame range): load raw files, collapse heads in memory, rollout, and save.
+    Process a single window (frame range): load raw files, collapse heads using entropy-based weights, rollout, and save.
+    
+    For each layer, computes entropy-based weights for each head and uses weighted sum instead of simple averaging
+    when collapsing heads. Heads with lower entropy (more focused attention) receive higher weights.
     
     Args:
         group_files: Dictionary mapping layer_idx to file_path for a video/frame range
@@ -191,7 +345,7 @@ def process_window(group_files, attention_maps_dir, num_layers=24):
     """
     video_id, frame_start, frame_end = None, None, None
     
-    # Load all raw layers and collapse heads in memory
+    # Load all raw layers and collapse heads using entropy-based weights
     layer_attentions = {}
     num_frames = None
     num_patches = None
@@ -218,10 +372,18 @@ def process_window(group_files, attention_maps_dir, num_layers=24):
         
         attn_weights = data['attention_weights']
         
+        # Remove CLS token as the first step (remove first row and first column)
+        attn_weights = remove_cls_token(attn_weights)
+        
         # Check if already collapsed (3D) or raw (4D)
         if len(attn_weights.shape) == 4:
-            # Raw file: collapse heads in memory
-            attn_collapsed = collapse_heads_in_memory(attn_weights)
+            # Raw file: collapse heads using entropy-based weights
+            # Compute entropy and weights for this layer
+            _, head_weights = compute_attention_head_entropy(attn_weights, remove_cls=False)
+            # Note: remove_cls=False because we already removed CLS token above
+            
+            # Collapse heads using weighted sum
+            attn_collapsed = collapse_heads_with_weights(attn_weights, head_weights)
         elif len(attn_weights.shape) == 3:
             # Already collapsed: use as is
             attn_collapsed = attn_weights
@@ -265,7 +427,9 @@ def process_directory(directory):
     
     Processes one window (frame range) at a time:
     1. Load all 24 raw layer files for that window
-    2. Collapse heads in memory (no intermediate files)
+    2. Collapse heads using entropy-based weights (no intermediate files)
+       - Computes entropy for each head and uses softmax(-entropy) as weights
+       - Heads with lower entropy (more focused) receive higher weights
     3. Rollout across layers
     4. Save individual window result
     5. Free memory and move to next window
@@ -408,7 +572,7 @@ def process_directory(directory):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Process spatial attention maps: collapse heads and rollout across layers"
+        description="Process spatial attention maps: collapse heads using entropy-based weights and rollout across layers"
     )
     parser.add_argument(
         "directory",
