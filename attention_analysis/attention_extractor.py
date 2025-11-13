@@ -139,7 +139,7 @@ class ViTAttentionHook:
             # Apply softmax to get attention weights
             attn_weights = attn.softmax(dim=-1)
             
-            # Store attention weights with layer information
+            # Store attention weights BEFORE dropout (for visualization purposes)
             # Convert to numpy immediately - this frees GPU tensor memory
             attn_weights_np = attn_weights.detach().cpu().numpy()
             entry = {
@@ -162,9 +162,15 @@ class ViTAttentionHook:
             # Tensor is freed automatically when we convert to numpy
             # The numpy array is stored in entry, so don't delete it here
             
+            # Apply attention dropout (for training/inference consistency)
+            if hasattr(self.attention_module, 'attn_drop'):
+                attn_weights = self.attention_module.attn_drop(attn_weights)
+            
             # Continue with original computation
             x_out = (attn_weights @ v).view(B, num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
             x_out = self.attention_module.proj(x_out)
+            if hasattr(self.attention_module, 'proj_drop'):
+                x_out = self.attention_module.proj_drop(x_out)
             
             return x_out
     
