@@ -7,7 +7,6 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import zoom
 
 
 def load_rolled_out_spatial_attention(directory, video_id):
@@ -286,6 +285,68 @@ def normalize_per_frame(column_averages):
     return normalized
 
 
+def log_normalize_per_frame(column_averages, epsilon=1e-10):
+    """
+    Normalize each frame's column averages using log normalization, then scale to [0, 1].
+    
+    For each frame (each row):
+    1. Add epsilon to avoid log(0)
+    2. Apply log transformation: log(values + epsilon)
+    3. Normalize to [0, 1] using min-max: (log_values - log_min) / (log_max - log_min)
+    
+    This helps visualize attention patterns when values span multiple orders of magnitude.
+    
+    Args:
+        column_averages: Array with shape [num_frames, num_patches]
+        epsilon: Small value to add before taking log (default: 1e-10)
+    
+    Returns:
+        Log-normalized array with shape [num_frames, num_patches], values in [0, 1]
+    """
+    if len(column_averages.shape) != 2:
+        raise ValueError(f"Expected 2D array [num_frames, num_patches], got shape {column_averages.shape}")
+    
+    num_frames, num_patches = column_averages.shape
+    normalized = np.zeros_like(column_averages, dtype=np.float32)
+    
+    for frame_idx in range(num_frames):
+        frame_values = column_averages[frame_idx]
+        
+        # Add epsilon and apply log transformation
+        log_values = np.log(frame_values + epsilon)
+        
+        # Normalize log values to [0, 1]
+        log_min = log_values.min()
+        log_max = log_values.max()
+        log_range = log_max - log_min
+        
+        if log_range == 0:
+            # All log values are the same, set to 0
+            normalized[frame_idx] = np.zeros_like(frame_values)
+        else:
+            normalized[frame_idx] = (log_values - log_min) / log_range
+    
+    return normalized
+
+
+def normalize_rows(matrix):
+    """
+    Row normalize a matrix so each row sums to 1.0.
+    
+    This is used for patch-by-patch attention maps, where each row represents
+    a patch's attention distribution over all other patches.
+    
+    Args:
+        matrix: Attention matrix with shape [num_patches, num_patches]
+    
+    Returns:
+        Row-normalized matrix with same shape, where each row sums to 1.0
+    """
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)  # Avoid division by zero
+    return matrix / row_sums
+
+
 def compute_patch_grid_dimensions(num_patches, patch_size=16, has_cls_token=True):
     """
     Compute patch grid dimensions (H_patches, W_patches) from total number of patches.
@@ -476,9 +537,9 @@ def main():
     column_averages = average_columns_per_frame(attention_map)
     print(f"Column averages shape: {column_averages.shape}")
     
-    # Remove CLS token (first entry, index 0) before normalization
-    print("Removing CLS token (index 0) from column averages...")
-    column_averages_spatial = column_averages[:, 1:]  # Shape: [num_frames, num_patches - 1]
+    # Note: CLS token is already removed in spatial_rollout.py, so column_averages
+    # already contains only spatial patches (no CLS token)
+    column_averages_spatial = column_averages  # Already spatial-only (CLS removed in rollout)
     print(f"Column averages (spatial only) shape: {column_averages_spatial.shape}")
     
     # Normalize each frame's column averages between 0 and 1 (per frame, independently)
@@ -487,9 +548,17 @@ def main():
     print(f"Normalized averages shape: {normalized_averages.shape}")
     print(f"Normalized value range: [{normalized_averages.min():.4f}, {normalized_averages.max():.4f}]")
     
+    # Log normalize each frame's column averages (per frame, independently)
+    print("Log normalizing each frame's column averages (per frame)...")
+    log_normalized_averages = log_normalize_per_frame(column_averages_spatial)
+    print(f"Log-normalized averages shape: {log_normalized_averages.shape}")
+    print(f"Log-normalized value range: [{log_normalized_averages.min():.4f}, {log_normalized_averages.max():.4f}]")
+    
     # Compute patch grid dimensions
-    num_patches = attention_map.shape[1]  # Get num_patches from attention map
-    print(f"\nComputing patch grid dimensions for {num_patches} patches...")
+    # Note: CLS token is already removed in spatial_rollout.py, so num_patches here
+    # refers to spatial patches only (no CLS token)
+    num_patches = attention_map.shape[1]  # Get num_patches from attention map (spatial patches only)
+    print(f"\nComputing patch grid dimensions for {num_patches} spatial patches (CLS token already removed)...")
     
     # Load image dimensions from inference/image_dimensions.json (required)
     print(f"\nLoading image dimensions from inference/image_dimensions.json...")
@@ -522,9 +591,10 @@ def main():
           f"bottom={pad_info['pad_bottom']}, right={pad_info['pad_right']}")
     
     # Verify dimensions match num_patches
-    expected_patches = 1 + H_patches * W_patches  # 1 CLS token + spatial patches
-    if expected_patches != num_patches:
-        print(f"WARNING: Dimensions give {expected_patches} patches, but attention map has {num_patches} patches")
+    # Note: CLS token is already removed in spatial_rollout.py, so we expect only spatial patches
+    expected_spatial_patches = H_patches * W_patches  # Spatial patches only (CLS already removed)
+    if expected_spatial_patches != num_patches:
+        print(f"WARNING: Dimensions give {expected_spatial_patches} spatial patches, but attention map has {num_patches} patches")
     
     # Load, resize, and pad all frames and create attention overlays
     print(f"\nLoading frame images and creating attention overlays...")
@@ -569,8 +639,8 @@ def main():
             pad_right=pad_info['pad_right']
         )
         
-        # Get attention values for this frame (CLS token already removed)
-        frame_attention = normalized_averages[frame_idx]  # Shape: [num_patches - 1]
+        # Get attention values for this frame (CLS token already removed in rollout)
+        frame_attention = normalized_averages[frame_idx]  # Shape: [num_patches] (spatial patches only)
         
         # Reshape attention to patch grid (H_patches x W_patches)
         attention_grid = frame_attention.reshape(H_patches, W_patches)
@@ -581,15 +651,37 @@ def main():
         # Display the processed image
         ax.imshow(img_processed, aspect='auto')
         
-        # Resize attention grid to match image dimensions for overlay
+        # Get image dimensions
         img_height, img_width = img_processed.size[1], img_processed.size[0]  # PIL uses (width, height)
-        attention_overlay = zoom(attention_grid, (img_height / H_patches, img_width / W_patches), order=1)
+        
+        # Create discrete patch overlay (each patch is a square, no interpolation)
+        # Calculate patch size in pixels
+        patch_size_pixels_h = img_height / H_patches
+        patch_size_pixels_w = img_width / W_patches
+        
+        # Create a full-size overlay image initialized to zeros (transparent)
+        attention_overlay = np.zeros((img_height, img_width), dtype=np.float32)
+        
+        # Fill each patch region with its attention value
+        for patch_row in range(H_patches):
+            for patch_col in range(W_patches):
+                # Get attention value for this patch
+                attn_value = attention_grid[patch_row, patch_col]
+                
+                # Calculate pixel boundaries for this patch
+                y_start = int(patch_row * patch_size_pixels_h)
+                y_end = int((patch_row + 1) * patch_size_pixels_h)
+                x_start = int(patch_col * patch_size_pixels_w)
+                x_end = int((patch_col + 1) * patch_size_pixels_w)
+                
+                # Fill the patch region with the attention value
+                attention_overlay[y_start:y_end, x_start:x_end] = attn_value
         
         # Overlay attention heatmap with transparency (transparent to red)
         # Use 'Reds' colormap and make alpha proportional to attention values
         # Low values (0) will be transparent, high values (1) will be opaque red
         im = ax.imshow(attention_overlay, cmap='Reds', alpha=attention_overlay, aspect='auto', 
-                       interpolation='bilinear', vmin=0, vmax=1)
+                       interpolation='nearest', vmin=0, vmax=1)
         
         ax.set_title(f'Video {video_id}, Frame {frame_idx}\nSpatial Attention Overlay', fontsize=12)
         ax.axis('off')
@@ -604,10 +696,98 @@ def main():
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
         
+        # Create log-normalized attention overlay plot
+        # Get log-normalized attention values for this frame
+        frame_attention_log = log_normalized_averages[frame_idx]  # Shape: [num_patches] (spatial patches only)
+        
+        # Reshape attention to patch grid (H_patches x W_patches)
+        attention_grid_log = frame_attention_log.reshape(H_patches, W_patches)
+        
+        # Create the plot with overlay
+        fig, ax = plt.subplots(1, 1, figsize=(12, 9))
+        
+        # Display the processed image
+        ax.imshow(img_processed, aspect='auto')
+        
+        # Create a full-size overlay image initialized to zeros (transparent)
+        attention_overlay_log = np.zeros((img_height, img_width), dtype=np.float32)
+        
+        # Fill each patch region with its log-normalized attention value
+        for patch_row in range(H_patches):
+            for patch_col in range(W_patches):
+                # Get log-normalized attention value for this patch
+                attn_value_log = attention_grid_log[patch_row, patch_col]
+                
+                # Calculate pixel boundaries for this patch
+                y_start = int(patch_row * patch_size_pixels_h)
+                y_end = int((patch_row + 1) * patch_size_pixels_h)
+                x_start = int(patch_col * patch_size_pixels_w)
+                x_end = int((patch_col + 1) * patch_size_pixels_w)
+                
+                # Fill the patch region with the log-normalized attention value
+                attention_overlay_log[y_start:y_end, x_start:x_end] = attn_value_log
+        
+        # Overlay attention heatmap with transparency (transparent to red)
+        # Use 'Reds' colormap and make alpha proportional to attention values
+        # Low values (0) will be transparent, high values (1) will be opaque red
+        im = ax.imshow(attention_overlay_log, cmap='Reds', alpha=attention_overlay_log, aspect='auto', 
+                       interpolation='nearest', vmin=0, vmax=1)
+        
+        ax.set_title(f'Video {video_id}, Frame {frame_idx}\nSpatial Attention Overlay (Log-Normalized)', fontsize=12)
+        ax.axis('off')
+        
+        # Add colorbar
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Log-Normalized Attention')
+        
+        plt.tight_layout()
+        
+        # Save the log-normalized plot
+        output_path_log = os.path.join(output_dir, f"video_{video_id}_frame_{frame_idx:05d}_attention_log.png")
+        plt.savefig(output_path_log, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Plot patch-by-patch attention heatmap (row-normalized)
+        # Get the full attention matrix for this frame (CLS token already removed in rollout)
+        frame_attn_matrix = attention_map[frame_idx]  # Shape: [num_patches, num_patches] (spatial patches only)
+        
+        # Row-normalize the attention matrix (consistent with temporal attention plotting)
+        frame_attn_normalized = normalize_rows(frame_attn_matrix)
+        
+        # Create patch-by-patch heatmap (row-normalized)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        im = ax.imshow(frame_attn_normalized, cmap='viridis', aspect='equal', interpolation='nearest')
+        ax.set_title(f'Patch-by-Patch Attention (Row-Normalized)\nVideo {video_id}, Frame {frame_idx}', fontsize=12)
+        ax.set_xlabel('Patch Index (Column)', fontsize=11)
+        ax.set_ylabel('Patch Index (Row)', fontsize=11)
+        ax.set_box_aspect(1)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Attention Weight')
+        plt.tight_layout()
+        
+        # Save the patch-by-patch heatmap (row-normalized)
+        output_path_patch = os.path.join(output_dir, f"video_{video_id}_frame_{frame_idx:05d}_patch_attention.png")
+        plt.savefig(output_path_patch, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Plot patch-by-patch attention heatmap (non-normalized, raw values)
+        # Create patch-by-patch heatmap (non-normalized)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        im = ax.imshow(frame_attn_matrix, cmap='viridis', aspect='equal', interpolation='nearest')
+        ax.set_title(f'Patch-by-Patch Attention (Non-Normalized)\nVideo {video_id}, Frame {frame_idx}', fontsize=12)
+        ax.set_xlabel('Patch Index (Column)', fontsize=11)
+        ax.set_ylabel('Patch Index (Row)', fontsize=11)
+        ax.set_box_aspect(1)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Attention Weight (Raw)')
+        plt.tight_layout()
+        
+        # Save the patch-by-patch heatmap (non-normalized)
+        output_path_patch_raw = os.path.join(output_dir, f"video_{video_id}_frame_{frame_idx:05d}_patch_attention_raw.png")
+        plt.savefig(output_path_patch_raw, dpi=150, bbox_inches='tight')
+        plt.close()
+        
         if (frame_idx + 1) % 10 == 0:
             print(f"  Processed {frame_idx + 1}/{num_frames} frames...")
     
-    print(f"\nSaved {num_frames} attention overlay plots to: {output_dir}")
+    print(f"\nSaved {num_frames} attention overlay plots (min-max normalized), {num_frames} attention overlay plots (log-normalized), {num_frames} row-normalized patch-by-patch heatmaps, and {num_frames} non-normalized patch-by-patch heatmaps to: {output_dir}")
     
     # Continue with patch coordinate mapping
     # Use original dimensions if available, otherwise use padded
@@ -630,18 +810,22 @@ def main():
     pad_left = pad_info.get('pad_left', 0) if pad_info else 0
     coord_space = "original image" if (pad_top != 0 or pad_left != 0) or original_image_height is not None else "padded image"
     print(f"  Coordinates are in {coord_space} space")
-    test_patches = [0, 1, 2, H_patches, H_patches * W_patches // 2, num_patches - 1]
-    for patch_idx in test_patches:
-        if patch_idx < num_patches:
+    # Note: CLS token is already removed, so patch indices start at 0 for first spatial patch
+    # But patch_index_to_image_coords expects token indices (0=CLS, 1+=spatial), so we add 1
+    test_spatial_indices = [0, 1, 2, H_patches, H_patches * W_patches // 2, num_patches - 1]
+    for spatial_idx in test_spatial_indices:
+        if spatial_idx < num_patches:
+            # Convert spatial index to token index (add 1 because CLS token is at index 0 in token space)
+            token_idx = spatial_idx + 1
             coords = patch_index_to_image_coords(
-                patch_idx, H_patches, W_patches, patch_size=16, has_cls_token=True,
+                token_idx, H_patches, W_patches, patch_size=16, has_cls_token=True,
                 pad_top=pad_top, pad_left=pad_left
             )
             if coords is None:
-                print(f"  Patch {patch_idx}: CLS token (no spatial location)")
+                print(f"  Spatial patch {spatial_idx} (token {token_idx}): CLS token (no spatial location)")
             else:
                 x_min, y_min, x_max, y_max = coords
-                print(f"  Patch {patch_idx}: image coords ({x_min}, {y_min}) to ({x_max}, {y_max})")
+                print(f"  Spatial patch {spatial_idx} (token {token_idx}): image coords ({x_min}, {y_min}) to ({x_max}, {y_max})")
     
     print("\nFunction completed successfully. Processed first frame image saved.")
 
