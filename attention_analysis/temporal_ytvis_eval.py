@@ -34,14 +34,28 @@ for p in (_PROJECT_ROOT, _DVIS_PLUS_ROOT):
 from mask2former_video.data_video.ytvis_eval import YTVISEvaluator
 
 
-def _instances_to_coco_json_video_with_refiner(inputs, outputs):
+def _instances_to_coco_json_video_with_refiner(inputs, outputs, attention_extractor=None):
     """
-    Convert model outputs to YTVIS-style JSON entries, adding refiner_id.
+    Convert model outputs to YTVIS-style JSON entries, adding refiner_id and predictor_query_id.
     Expects outputs to contain: pred_scores, pred_labels, pred_masks, pred_ids (aligned).
+    
+    Args:
+        inputs: Input dictionary containing video_id and optionally frame_idx
+        outputs: Model outputs containing predictions
+        attention_extractor: Optional AttentionExtractor to look up predictor query IDs
     """
     assert len(inputs) == 1, "More than one inputs are loaded for inference!"
 
     video_id = inputs[0]["video_id"]
+    # Try to get frame_idx from inputs, but it might not be available for window-based inference
+    frame_idx = inputs[0].get("frame_idx", None)
+    
+    # If frame_idx is not available, try to get it from attention extractor's video context
+    if frame_idx is None and attention_extractor is not None:
+        video_context = getattr(attention_extractor, '_current_video_context', None)
+        if video_context is not None and video_context.get('video_id') == video_id:
+            # Use frame_end from window context as a fallback
+            frame_idx = video_context.get('frame_end')
 
     scores = outputs["pred_scores"]
     labels = outputs["pred_labels"]
@@ -57,14 +71,44 @@ def _instances_to_coco_json_video_with_refiner(inputs, outputs):
         for rle in segms:
             rle["counts"] = rle["counts"].decode("utf-8")
 
-        # Build with desired key order; place refiner_id before segmentations
+        # Build with desired key order; place refiner_id and predictor_query_id before segmentations
         res = OrderedDict()
         res["video_id"] = video_id
         res["score"] = s
         res["category_id"] = l
         if refiner_ids is not None and instance_id < len(refiner_ids):
             try:
-                res["refiner_id"] = int(refiner_ids[instance_id])
+                refiner_id = int(refiner_ids[instance_id])
+                res["refiner_id"] = refiner_id
+                
+                # Try to get predictor query ID(s) if extractor is available
+                if attention_extractor is not None:
+                    # Get all predictor_query_ids across all windows for this instance
+                    # refiner_id is the index in the refiner output, we need to convert it to sequence_id first
+                    all_query_mappings = attention_extractor.get_all_predictor_queries_for_refiner_id(
+                        video_id=video_id,
+                        refiner_id=refiner_id
+                    )
+                    
+                    if all_query_mappings:
+                        # Store list of predictor_query_ids with their frame information
+                        res["predictor_query_ids"] = [
+                            {
+                                "predictor_query_id": q["predictor_query_id"],
+                                "frame_start": q["frame_start"],
+                                "frame_end": q["frame_end"]
+                            }
+                            for q in all_query_mappings
+                        ]
+                    else:
+                        # Debug: log when we can't find the mapping
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.debug(
+                            f"Could not find predictor_query_id for video_id={video_id}, "
+                            f"refiner_id={refiner_id}, frame_idx={frame_idx}. "
+                            f"Available windows: {list(attention_extractor._query_tracking_maps.get(video_id, {}).keys())}"
+                        )
             except Exception:
                 pass
         res["segmentations"] = segms
@@ -267,7 +311,10 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
         super().process(inputs, outputs)
         # Augmented predictions for results_temporal.json
         try:
-            aug = _instances_to_coco_json_video_with_refiner(inputs, outputs)
+            aug = _instances_to_coco_json_video_with_refiner(
+                inputs, outputs, 
+                attention_extractor=self._attention_extractor
+            )
             self._predictions_temporal.extend(aug)
         except Exception as e:
             logger = logging.getLogger(__name__)
@@ -489,6 +536,15 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
             except Exception as e:
                 logging.getLogger(__name__).warning(
                     f"Failed to write image_dimensions.json: {e}"
+                )
+            
+            # Save query tracking maps (refiner_id → predictor_query_idx mapping)
+            try:
+                if self._attention_extractor is not None and hasattr(self._attention_extractor, 'save_query_tracking_maps'):
+                    self._attention_extractor.save_query_tracking_maps()
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    f"Failed to save query tracking maps: {e}"
                 )
 
         # Return the same metrics dict as base

@@ -205,32 +205,36 @@ def setup(args):
     if datatype == 'camera':
         print("Registering camera datasets...")
         register_ytvis_instances(
-            "ytvis_fishway_val_camera",
+            "ytvis_fishway_val_camera_fold6",
             {},
-            "/data/fishway_ytvis/val_vid_66.json",
+            #"/data/fishway_ytvis/val_vid_66.json",
+            "/data/fishway_ytvis/val_fold6.json",
             "/data/fishway_ytvis/all_videos"
         )
     elif datatype == 'silhouette':
         print("Registering silhouette datasets...")
         register_ytvis_instances(
-            "ytvis_fishway_val_silhouette",
+            "ytvis_fishway_val_silhouette_fold6",
             {},
-            "/data/fishway_ytvis/val_vid_66.json",
+            #"/data/fishway_ytvis/val_vid_66.json",
+            "/data/fishway_ytvis/val_fold6.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
     else:
         print("Warning: Could not determine datatype from config file. Registering all datasets.")
         # Fallback: register all datasets if datatype cannot be determined
         register_ytvis_instances(
-            "ytvis_fishway_val_camera",
+            "ytvis_fishway_val_camera_fold6",
             {},
-            "/data/fishway_ytvis/val_vid_66.json",
+            #"/data/fishway_ytvis/val_vid_66.json",
+            "/data/fishway_ytvis/val_fold6.json",
             "/data/fishway_ytvis/all_videos"
         )
         register_ytvis_instances(
-            "ytvis_fishway_val_silhouette",
+            "ytvis_fishway_val_silhouette_fold6",
             {},
-            "/data/fishway_ytvis/val_vid_66.json",
+            #"/data/fishway_ytvis/val_vid_66.json",
+            "/data/fishway_ytvis/val_fold6.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
 
@@ -281,6 +285,8 @@ def main(args):
             ATTENTION_EXTRACTOR = AttentionExtractor(
                 model, 
                 cfg.OUTPUT_DIR,
+                extract_backbone=False,  # Set to False to skip backbone attention extraction (saves memory)
+                extract_refiner=True,    # Set to False to skip refiner attention extraction
                 save_immediately_from_hook=True,  # Save directly from hook, no accumulation
                 window_size=cfg.MODEL.MASK_FORMER.TEST.WINDOW_SIZE  # Pass window_size from config
             )
