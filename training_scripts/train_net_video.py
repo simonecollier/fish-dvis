@@ -317,23 +317,34 @@ def setup(args):
     train_datasets = config_data.get('DATASETS', {}).get('TRAIN', [])
     test_datasets = config_data.get('DATASETS', {}).get('TEST', [])
     
-    # Helper function to extract stride and base info from dataset name
+    # Helper function to extract stride, fold and base info from dataset name
     def parse_dataset_name(dataset_name):
-        """Extract stride value and base dataset info from dataset name.
+        """Extract stride value, fold value and base dataset info from dataset name.
         
         Returns:
-            tuple: (base_name, is_train, datatype, stride_value, stride_suffix)
-            - base_name: base name without stride suffix (e.g., 'ytvis_fishway_train_silhouette')
+            tuple: (base_name, is_train, datatype, stride_value, stride_suffix, fold_value, fold_suffix)
+            - base_name: base name without stride/fold suffix (e.g., 'ytvis_fishway_train_silhouette')
             - is_train: True if train, False if val/test
             - datatype: 'camera' or 'silhouette'
             - stride_value: stride value (None if no stride)
             - stride_suffix: '_stride{N}' or ''
+            - fold_value: fold value (None if no fold)
+            - fold_suffix: '_fold{N}' or ''
         """
         # Match stride pattern: _stride{N} at the end
         stride_match = re.search(r'_stride(\d+)$', dataset_name)
         stride_value = int(stride_match.group(1)) if stride_match else None
         stride_suffix = stride_match.group(0) if stride_match else ''
-        base_name = dataset_name[:-len(stride_suffix)] if stride_suffix else dataset_name
+        
+        # Match fold pattern: _fold{N} at the end (but check before stride if both exist)
+        # Remove stride suffix first to find fold
+        name_without_stride = dataset_name[:-len(stride_suffix)] if stride_suffix else dataset_name
+        fold_match = re.search(r'_fold(\d+)$', name_without_stride)
+        fold_value = int(fold_match.group(1)) if fold_match else None
+        fold_suffix = fold_match.group(0) if fold_match else ''
+        
+        # Base name is without both stride and fold suffixes
+        base_name = name_without_stride[:-len(fold_suffix)] if fold_suffix else name_without_stride
         
         # Determine if train or val
         is_train = 'train' in base_name
@@ -342,7 +353,7 @@ def setup(args):
         # Determine datatype
         datatype = 'silhouette' if 'silhouette' in base_name else 'camera'
         
-        return base_name, is_train, datatype, stride_value, stride_suffix
+        return base_name, is_train, datatype, stride_value, stride_suffix, fold_value, fold_suffix
     
     # Collect all unique datasets that need to be registered
     all_datasets = set(train_datasets + test_datasets)
@@ -353,7 +364,7 @@ def setup(args):
         if dataset_name in registered_datasets:
             continue
             
-        base_name, is_train, datatype, stride_value, stride_suffix = parse_dataset_name(dataset_name)
+        base_name, is_train, datatype, stride_value, stride_suffix, fold_value, fold_suffix = parse_dataset_name(dataset_name)
         
         # Determine JSON path
         if is_train:
@@ -363,8 +374,12 @@ def setup(args):
             json_name = 'val'
             image_root = '/data/fishway_ytvis/all_videos' if datatype == 'camera' else '/data/fishway_ytvis/all_videos_mask'
         
+        # Use fold JSON if fold is specified (takes precedence over stride)
+        if fold_value:
+            json_path = f"/home/simone/shared-data/fishway_ytvis/{json_name}_fold{fold_value}.json"
+            print(f"Registering {dataset_name} with fold JSON: {json_path}")
         # Use strided JSON if stride is specified
-        if stride_value:
+        elif stride_value:
             json_path = f"/data/fishway_ytvis/{json_name}_stride{stride_value}.json"
             print(f"Registering {dataset_name} with strided JSON: {json_path}")
         else:
