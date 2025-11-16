@@ -114,9 +114,14 @@ def create_k_folds(
         # Split videos of this category into k folds
         n_videos = len(video_ids)
         fold_sizes = [n_videos // k] * k
-        # Distribute remainder videos across first few folds
-        for i in range(n_videos % k):
-            fold_sizes[i] += 1
+        remainder = n_videos % k
+        
+        # Distribute remainder videos evenly using round-robin
+        # Start from different fold for each category to avoid accumulation in early folds
+        start_fold = category_id % k
+        for i in range(remainder):
+            fold_idx = (start_fold + i) % k
+            fold_sizes[fold_idx] += 1
         
         # Assign videos to folds
         start_idx = 0
@@ -262,8 +267,8 @@ def main():
     parser.add_argument(
         '--k',
         type=int,
-        default=5,
-        help='Number of folds (default: 5)'
+        default=6,
+        help='Number of folds (default: 6)'
     )
     parser.add_argument(
         '--random-seed',
