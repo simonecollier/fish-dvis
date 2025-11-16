@@ -108,7 +108,7 @@ def extract_per_category_metrics(coco_eval, coco_gt):
     
     return per_category_metrics
 
-def run_dvis_daq_evaluation_with_renamed_pycocotools(predictions, ground_truth_json_path):
+def run_dvis_daq_evaluation_with_renamed_pycocotools(predictions, ground_truth_json_path, dataset_name="ytvis_fishway_val"):
     """
     Run DVIS-DAQ evaluation by temporarily renaming the pycocotools folder to avoid import conflicts.
     """
@@ -138,8 +138,18 @@ def run_dvis_daq_evaluation_with_renamed_pycocotools(predictions, ground_truth_j
         from detectron2.data import MetadataCatalog
         from detectron2.utils.file_io import PathManager
         
-        # Register dataset
-        dataset_name = "ytvis_fishway_val"
+        # Clear existing metadata if it exists (to allow re-registration with different JSON)
+        if dataset_name in MetadataCatalog.list():
+            try:
+                # Try to clear the existing metadata
+                catalog = MetadataCatalog.get(dataset_name)
+                # Remove from catalog if possible
+                if hasattr(MetadataCatalog, '_NAME_TO_METADATA'):
+                    MetadataCatalog._NAME_TO_METADATA.pop(dataset_name, None)
+            except:
+                pass
+        
+        # Register dataset with unique name if needed, or use provided name
         MetadataCatalog.get(dataset_name).set(
             json_file=ground_truth_json_path,
             image_root="/data/fishway_ytvis/all_videos",
@@ -272,9 +282,115 @@ def run_dvis_daq_evaluation_subprocess(predictions, ground_truth_json_path):
         print(f"Error in DVIS-DAQ evaluation: {e}")
         return None
 
-def compute_dvis_daq_metrics(predictions, ground_truth_json_path, dataset_name="ytvis_fishway_val"):
+def compute_dvis_daq_metrics(predictions, ground_truth_json_path, dataset_name="ytvis_fishway_val", skip_folder_rename=False):
     """
     Compute metrics using the exact DVIS-DAQ evaluation methodology.
     This function uses the renamed pycocotools approach to avoid import issues.
+    
+    Args:
+        predictions: List of predictions
+        ground_truth_json_path: Path to ground truth JSON file
+        dataset_name: Name of the dataset
+        skip_folder_rename: If True, assumes pycocotools folder is already renamed (for parallel processing)
     """
-    return run_dvis_daq_evaluation_with_renamed_pycocotools(predictions, ground_truth_json_path)
+    if skip_folder_rename:
+        return run_dvis_daq_evaluation_without_renaming(predictions, ground_truth_json_path, dataset_name)
+    else:
+        return run_dvis_daq_evaluation_with_renamed_pycocotools(predictions, ground_truth_json_path, dataset_name)
+
+
+def run_dvis_daq_evaluation_without_renaming(predictions, ground_truth_json_path, dataset_name="ytvis_fishway_val"):
+    """
+    Run DVIS-DAQ evaluation assuming pycocotools folder is already renamed.
+    This version does NOT rename/restore the folder - use when folder is managed externally.
+    """
+    dvis_daq_path = '/home/simone/fish-dvis/DVIS_Plus/DVIS_DAQ/dvis_Plus/data_video/datasets'
+    pycocotools_backup_path = os.path.join(dvis_daq_path, 'pycocotools_backup')
+    
+    try:
+        # Add the datasets path to sys.path
+        if dvis_daq_path not in sys.path:
+            sys.path.insert(0, dvis_daq_path)
+        
+        # Now import the DVIS-DAQ evaluation components (assuming folder is already renamed)
+        from pycocotools_backup.oviseval import OVISeval
+        from ytvis_api.ytvos import YTVOS
+        from detectron2.data import MetadataCatalog
+        from detectron2.utils.file_io import PathManager
+        
+        # Clear existing metadata if it exists (to allow re-registration with different JSON)
+        if dataset_name in MetadataCatalog.list():
+            try:
+                # Try to clear the existing metadata
+                catalog = MetadataCatalog.get(dataset_name)
+                # Remove from catalog if possible
+                if hasattr(MetadataCatalog, '_NAME_TO_METADATA'):
+                    MetadataCatalog._NAME_TO_METADATA.pop(dataset_name, None)
+            except:
+                pass
+        
+        # Register dataset with unique name if needed, or use provided name
+        MetadataCatalog.get(dataset_name).set(
+            json_file=ground_truth_json_path,
+            image_root="/data/fishway_ytvis/all_videos",
+            evaluator_type="ytvis",
+        )
+        
+        # Load ground truth
+        metadata = MetadataCatalog.get(dataset_name)
+        json_file = PathManager.get_local_path(metadata.json_file)
+        coco_gt = YTVOS(json_file)
+        
+        # Convert predictions
+        coco_results = []
+        for pred in predictions:
+            segmentations = []
+            for seg in pred['segmentations']:
+                if seg is not None:
+                    segmentations.append(seg)
+                else:
+                    segmentations.append(None)
+            
+            coco_results.append({
+                'video_id': pred['video_id'],
+                'score': pred['score'],
+                'category_id': pred['category_id'],
+                'segmentations': segmentations
+            })
+        
+        # Load predictions
+        coco_dt = coco_gt.loadRes(coco_results)
+        
+        # Run evaluation - use exact same parameters as DVIS-DAQ
+        coco_eval = OVISeval(coco_gt, coco_dt)
+        # For COCO, the default max_dets_per_image is [1, 10, 100].
+        max_dets_per_image = [1, 10, 100]  # Default from COCOEval
+        coco_eval.params.maxDets = max_dets_per_image
+        
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        coco_eval.summarize()
+        
+        # Extract metrics
+        metrics = {}
+        if len(coco_eval.stats) >= 18:
+            metrics['AP'] = coco_eval.stats[0]
+            metrics['AP50'] = coco_eval.stats[1]
+            metrics['AP75'] = coco_eval.stats[2]
+            metrics['APs'] = coco_eval.stats[3]
+            metrics['APm'] = coco_eval.stats[4]
+            metrics['APl'] = coco_eval.stats[5]
+            metrics['AR1'] = coco_eval.stats[9]
+            metrics['AR10'] = coco_eval.stats[10]
+            metrics['AR100'] = coco_eval.stats[11]
+
+        # Extract comprehensive per-category metrics
+        per_category_metrics = extract_per_category_metrics(coco_eval, coco_gt)
+        
+        # Add to metrics
+        metrics['per_category_metrics'] = per_category_metrics
+
+        return metrics
+        
+    except Exception as e:
+        return None
