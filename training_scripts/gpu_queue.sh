@@ -8,7 +8,8 @@
 #
 
 
-set -e  # Exit on any error
+# Don't use set -e here - we handle errors explicitly
+# set -e  # Exit on any error
 
 # Colors for output
 RED='\033[0;31m'
@@ -22,14 +23,14 @@ NC='\033[0m' # No Color
 QUEUE_FILE="${QUEUE_FILE:-gpu_queue_commands.txt}"
 LOG_FILE="${LOG_FILE:-gpu_queue.log}"
 USE_DYNAMIC_QUEUE=false
-POLL_INTERVAL=2  # seconds to wait between checking queue file
 
 # Function to log messages
 log() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo -e "${message}"
-    echo "[${timestamp}] ${message}" >> "$LOG_FILE"
+    # Write to log file (ignore errors to prevent script from exiting)
+    echo "[${timestamp}] ${message}" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Function to run a single command
@@ -122,10 +123,6 @@ main() {
                 file_path_provided=true
                 shift 2
                 ;;
-            --poll-interval)
-                POLL_INTERVAL="$2"
-                shift 2
-                ;;
             --help|-h)
                 echo "Usage: $0 [QUEUE_FILE] [OPTIONS]"
                 echo "   OR: $0 [OPTIONS] [command1] [command2] ..."
@@ -136,7 +133,6 @@ main() {
                 echo ""
                 echo "Options:"
                 echo "  --queue-file FILE    Use dynamic queue file (alternative to positional arg)"
-                echo "  --poll-interval SEC  Seconds to wait between checking queue file (default: 2)"
                 echo "  --help, -h           Show this help message"
                 echo ""
                 echo "Examples:"
@@ -213,6 +209,7 @@ main() {
     fi
     
     # Check if we have any commands
+    # If using dynamic queue, allow empty commands (will monitor file for new commands)
     if [ ${#commands[@]} -eq 0 ] && [ "$USE_DYNAMIC_QUEUE" != true ]; then
         echo "Error: No commands provided"
         echo "Usage: $0 [QUEUE_FILE]"
@@ -220,6 +217,11 @@ main() {
         echo "   OR: $0 < commands.txt"
         echo "   OR: $0 --queue-file queue.txt"
         exit 1
+    fi
+    
+    # If using dynamic queue but no commands found, warn but continue
+    if [ ${#commands[@]} -eq 0 ] && [ "$USE_DYNAMIC_QUEUE" = true ]; then
+        log "${YELLOW}No commands found in queue file. Monitoring for new commands...${NC}"
     fi
     
     local total=${#commands[@]}
@@ -242,13 +244,10 @@ main() {
     
     # Main processing loop
     while true; do
-        local has_work=false
-        
-        # If using dynamic queue, check for new commands first
+        # If using dynamic queue, check for new commands only after previous command completed
         if [ "$USE_DYNAMIC_QUEUE" = true ]; then
             read_queue_file "$QUEUE_FILE" "$queue_processed_lines"
             if [ ${#QUEUE_NEW_COMMANDS[@]} -gt 0 ]; then
-                has_work=true
                 for new_cmd in "${QUEUE_NEW_COMMANDS[@]}"; do
                     all_commands+=("$new_cmd")
                 done
@@ -258,7 +257,6 @@ main() {
         
         # Process commands from array
         if [ ${#all_commands[@]} -gt 0 ]; then
-            has_work=true
             local cmd="${all_commands[0]}"
             all_commands=("${all_commands[@]:1}")  # Remove first element
             ((cmd_num++))
@@ -276,26 +274,10 @@ main() {
                 exit 1
             fi
             echo ""
-        fi
-        
-        # If no work and not using dynamic queue, exit
-        if [ "$has_work" = false ]; then
-            if [ "$USE_DYNAMIC_QUEUE" = true ]; then
-                # Wait a bit before checking again
-                sleep "$POLL_INTERVAL"
-                # Check if we should exit (no more commands and queue file is empty or doesn't exist)
-                if [ ${#all_commands[@]} -eq 0 ]; then
-                    if [ ! -f "$QUEUE_FILE" ] || [ ! -s "$QUEUE_FILE" ]; then
-                        # Check one more time if there are any unprocessed lines
-                        read_queue_file "$QUEUE_FILE" "$queue_processed_lines"
-                        if [ ${#QUEUE_NEW_COMMANDS[@]} -eq 0 ]; then
-                            break
-                        fi
-                    fi
-                fi
-            else
-                break
-            fi
+        else
+            # No more commands in array - exit
+            # For dynamic queue, we already checked the file above, so if array is empty, there are no more commands
+            break
         fi
     done
     
