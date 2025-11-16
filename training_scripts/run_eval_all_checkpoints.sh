@@ -15,6 +15,7 @@ show_usage() {
     echo "Optional arguments:"
     echo "  Config settings:"
     echo "    --config-file <path>                  Use specific config file instead of model_dir/config.yaml"
+    echo "    --val-json <path>                     Use specific validation JSON file (overrides auto-detection)"
     echo ""
     echo "  Device settings:"
     echo "    --device <number>                     Set CUDA_VISIBLE_DEVICES (default: 0)"
@@ -64,6 +65,9 @@ show_usage() {
     echo ""
     echo "  # Evaluate checkpoints 11-20 on GPU 1 (run simultaneously)"
     echo "  $0 /path/to/model --checkpoint-range 11-20 --device 1"
+    echo ""
+    echo "  # Use custom validation JSON file"
+    echo "  $0 /path/to/model --val-json /path/to/custom_val.json"
     exit 1
 }
 
@@ -130,12 +134,17 @@ config_changes=()
 DEVICE=0
 CHECKPOINT_RANGE=""
 CUSTOM_CONFIG_FILE=""
+CUSTOM_VAL_JSON=""
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config-file)
             CUSTOM_CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --val-json)
+            CUSTOM_VAL_JSON="$2"
             shift 2
             ;;
         --device)
@@ -438,9 +447,19 @@ source /home/simone/.venv/bin/activate
 # Set environment variables
 export DETECTRON2_DATASETS=/data
 
-# Check for model-local validation JSON files (including strided versions)
-# Parse config to detect stride patterns in dataset names
-if [ -f "$CONFIG_FILE" ]; then
+# Handle validation JSON file
+if [ -n "$CUSTOM_VAL_JSON" ]; then
+    # Use custom val JSON if provided
+    if [ ! -f "$CUSTOM_VAL_JSON" ]; then
+        echo "Error: Custom validation JSON file not found: $CUSTOM_VAL_JSON"
+        exit 1
+    fi
+    export VAL_JSON_OVERRIDE="$CUSTOM_VAL_JSON"
+    echo "Using custom validation JSON: $VAL_JSON_OVERRIDE"
+elif [ -f "$CONFIG_FILE" ]; then
+    # Auto-detect validation JSON from config and model directory
+    # Check for model-local validation JSON files (including strided versions)
+    # Parse config to detect stride patterns in dataset names
     # Use python to parse YAML and detect stride patterns
     VAL_JSON_RESULT=$(CONFIG_FILE="$CONFIG_FILE" MODEL_DIR="$MODEL_DIR" python3 <<PYTHON_SCRIPT
 import yaml
@@ -458,10 +477,22 @@ try:
     test_datasets = config.get('DATASETS', {}).get('TEST', [])
     
     def get_json_path_from_dataset(dataset_name):
+        # Match stride pattern: _stride{N} at the end
         stride_match = re.search(r'_stride(\d+)$', dataset_name)
+        stride_value = int(stride_match.group(1)) if stride_match else None
+        stride_suffix = stride_match.group(0) if stride_match else ''
+        
+        # Match fold pattern: _fold{N} at the end (but check before stride if both exist)
+        name_without_stride = dataset_name[:-len(stride_suffix)] if stride_suffix else dataset_name
+        fold_match = re.search(r'_fold(\d+)$', name_without_stride)
+        fold_value = int(fold_match.group(1)) if fold_match else None
+        
         if 'val' in dataset_name:
-            if stride_match:
-                stride_value = stride_match.group(1)
+            # Use fold JSON if fold is specified (takes precedence over stride)
+            if fold_value:
+                return f"{model_dir}/val_fold{fold_value}.json"
+            # Use strided JSON if stride is specified
+            elif stride_value:
                 return f"{model_dir}/val_stride{stride_value}.json"
             else:
                 return f"{model_dir}/val.json"
@@ -498,7 +529,7 @@ PYTHON_SCRIPT
             EXPECTED_JSON=$(echo "$VAL_JSON_RESULT" | sed 's/^NOT_FOUND://')
             echo "Error: Required validation JSON file not found: $EXPECTED_JSON"
             echo "Please ensure the correct JSON file exists in the model directory."
-            echo "If using a stride dataset, make sure the corresponding strided JSON file was copied during training."
+            echo "If using a fold or stride dataset, make sure the corresponding JSON file (e.g., val_fold4.json or val_stride5.json) was copied during training."
             exit 1
         elif echo "$VAL_JSON_RESULT" | grep -q "^ERROR:"; then
             ERROR_MSG=$(echo "$VAL_JSON_RESULT" | sed 's/^ERROR://')
@@ -523,6 +554,9 @@ PYTHON_SCRIPT
         echo "Error: Could not determine validation JSON file from config."
         exit 1
     fi
+else
+    echo "Warning: Config file not found, cannot auto-detect validation JSON."
+    echo "Please provide --val-json argument or ensure config file exists."
 fi
 
 # Set CUDA_VISIBLE_DEVICES to the specified device
