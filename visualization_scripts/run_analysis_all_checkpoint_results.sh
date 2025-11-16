@@ -249,10 +249,22 @@ try:
     test_datasets = config.get('DATASETS', {}).get('TEST', [])
     
     def get_json_path_from_dataset(dataset_name):
+        # Match stride pattern: _stride{N} at the end
         stride_match = re.search(r'_stride(\d+)$', dataset_name)
+        stride_value = int(stride_match.group(1)) if stride_match else None
+        stride_suffix = stride_match.group(0) if stride_match else ''
+        
+        # Match fold pattern: _fold{N} at the end (but check before stride if both exist)
+        name_without_stride = dataset_name[:-len(stride_suffix)] if stride_suffix else dataset_name
+        fold_match = re.search(r'_fold(\d+)$', name_without_stride)
+        fold_value = int(fold_match.group(1)) if fold_match else None
+        
         if 'val' in dataset_name:
-            if stride_match:
-                stride_value = stride_match.group(1)
+            # Use fold JSON if fold is specified (takes precedence over stride)
+            if fold_value:
+                return f"{model_dir}/val_fold{fold_value}.json"
+            # Use strided JSON if stride is specified
+            elif stride_value:
                 return f"{model_dir}/val_stride{stride_value}.json"
             else:
                 return f"{model_dir}/val.json"
@@ -289,7 +301,7 @@ PYTHON_SCRIPT
             EXPECTED_JSON=$(echo "$VAL_JSON_RESULT" | sed 's/^NOT_FOUND://')
             echo "Error: Required validation JSON file not found: $EXPECTED_JSON"
             echo "Please ensure the correct JSON file exists in the model directory."
-            echo "If using a stride dataset, make sure the corresponding strided JSON file was copied during training."
+            echo "If using a fold or stride dataset, make sure the corresponding JSON file (e.g., val_fold4.json or val_stride5.json) was copied during training."
             exit 1
         elif echo "$VAL_JSON_RESULT" | grep -q "^ERROR:"; then
             ERROR_MSG=$(echo "$VAL_JSON_RESULT" | sed 's/^ERROR://')
