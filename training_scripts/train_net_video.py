@@ -306,6 +306,12 @@ def setup(args):
     add_daq_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    
+    # Store val_json path for use in dataset registration
+    # Priority: 1) --val-json argument, 2) VAL_JSON_OVERRIDE environment variable, 3) None (use default logic)
+    val_json_path = args.val_json
+    if val_json_path is None:
+        val_json_path = os.environ.get('VAL_JSON_OVERRIDE', None)
 
     # Register custom datasets based on config file
     # Read the config file to determine which datasets are needed
@@ -374,8 +380,12 @@ def setup(args):
             json_name = 'val'
             image_root = '/data/fishway_ytvis/all_videos' if datatype == 'camera' else '/data/fishway_ytvis/all_videos_mask'
         
+        # If --val-json is provided and this is a validation dataset, use the provided JSON
+        if not is_train and val_json_path is not None:
+            json_path = val_json_path
+            print(f"Registering {dataset_name} with custom val JSON: {json_path}")
         # Use fold JSON if fold is specified (takes precedence over stride)
-        if fold_value:
+        elif fold_value:
             json_path = f"/home/simone/shared-data/fishway_ytvis/{json_name}_fold{fold_value}.json"
             print(f"Registering {dataset_name} with fold JSON: {json_path}")
         # Use strided JSON if stride is specified
@@ -489,6 +499,7 @@ def main(args):
 if __name__ == "__main__":
     parser = default_argument_parser()
     parser.add_argument("--debug", action="store_true", help="Enable debug prints during training/evaluation")
+    parser.add_argument("--val-json", type=str, default=None, help="Path to JSON file to use for validation datasets (overrides config-based path)")
     args = parser.parse_args()
     #args.dist_url = 'tcp://127.0.0.1:50263'
     print("Command Line Args:", args)
