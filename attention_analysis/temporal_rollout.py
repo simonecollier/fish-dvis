@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import glob
+import re
 
 import numpy as np
 
@@ -32,15 +33,89 @@ def pick_top_predictions_by_video(predictions):
 def load_attention_for_video(run_dir, video_id):
     """Load attention maps npz and metadata for a video.
     
-    Looks for files matching pattern: video_{video_id}_*temporal_refiner_attn.npz
-    in the attention_maps directory (not inference/attention_maps).
+    Supports two naming patterns:
+    1. New pattern: video_{video_id}_frames*_refiner_temporal_layer_*_attn.npz (one file per layer)
+    2. Old pattern: video_{video_id}_*temporal_refiner_attn.npz (single file with all layers)
+    
+    Looks in attention_maps/ and inference/attention_maps/ directories.
     """
     # Try both locations: attention_maps/ and inference/attention_maps/
     attn_dir1 = os.path.join(run_dir, "attention_maps")
     attn_dir2 = os.path.join(run_dir, "inference", "attention_maps")
     
-    # Search for files matching the pattern
-    npz_patterns = [
+    # First, try to find files matching the new pattern (split by layer)
+    # Pattern: video_{video_id}_frames*_refiner_temporal_layer_*_attn.npz
+    new_patterns = [
+        os.path.join(attn_dir1, f"video_{video_id}_frames*_refiner_temporal_layer_*_attn.npz"),
+        os.path.join(attn_dir2, f"video_{video_id}_frames*_refiner_temporal_layer_*_attn.npz"),
+    ]
+    
+    layer_files = []
+    for pattern in new_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            layer_files.extend(matches)
+    
+    if layer_files:
+        # New pattern: multiple files, one per layer
+        # Sort by layer number to ensure consistent ordering
+        def extract_layer_num(path):
+            m = re.search(r'layer_(\d+)_attn\.npz', path)
+            return int(m.group(1)) if m else 999
+        
+        layer_files = sorted(set(layer_files), key=extract_layer_num)
+        
+        # Load all layer files and combine them
+        combined_arrays = {}
+        combined_meta = []
+        
+        for npz_path in layer_files:
+            # Load npz file
+            layer_arrays = np.load(npz_path)
+            
+            # Load metadata
+            meta_path = npz_path.replace(".npz", ".meta.json")
+            if not os.path.exists(meta_path):
+                raise FileNotFoundError(f"Could not find metadata file: {meta_path}")
+            
+            with open(meta_path, "r") as f:
+                layer_meta = json.load(f)
+            
+            # Extract layer name from metadata
+            layer_name = layer_meta.get("layer")
+            if not layer_name:
+                # Fallback: extract from filename
+                m = re.search(r'layer_(\d+)', npz_path)
+                layer_name = f"refiner.transformer_time_self_attention_layers.{m.group(1)}" if m else "unknown"
+            
+            # Create unique keys for each layer's arrays
+            # The npz files typically have a single key like "attention_weights"
+            for original_key in layer_arrays.keys():
+                # Create a unique key that includes layer info
+                # Use the layer number to make it unique
+                layer_num_match = re.search(r'layer_(\d+)', npz_path)
+                if layer_num_match:
+                    unique_key = f"{original_key}_layer_{layer_num_match.group(1)}"
+                else:
+                    unique_key = f"{original_key}_{len(combined_arrays)}"
+                
+                combined_arrays[unique_key] = layer_arrays[original_key]
+                
+                # Create metadata entry with both layer and key
+                meta_entry = {
+                    "layer": layer_name,
+                    "key": unique_key
+                }
+                # Copy other metadata fields if needed
+                combined_meta.append(meta_entry)
+        
+        if not combined_arrays:
+            raise FileNotFoundError(f"Could not load any attention data from layer files for video {video_id}")
+        
+        return combined_arrays, combined_meta
+    
+    # Fallback to old pattern: single file with all layers
+    old_patterns = [
         os.path.join(attn_dir1, f"video_{video_id}_*temporal_refiner_attn.npz"),
         os.path.join(attn_dir2, f"video_{video_id}_*temporal_refiner_attn.npz"),
         os.path.join(attn_dir1, f"video_{video_id}.npz"),  # Fallback to simple pattern
@@ -48,7 +123,7 @@ def load_attention_for_video(run_dir, video_id):
     ]
     
     npz_path = None
-    for pattern in npz_patterns:
+    for pattern in old_patterns:
         matches = glob.glob(pattern)
         if matches:
             npz_path = matches[0]  # Use first match
@@ -134,8 +209,40 @@ def normalize_rows(matrix):
     return matrix / row_sums
 
 
+def compute_rollout_from_transformed(transformed, skip_first_layer=False):
+    """Compute rollout from transformed matrices.
+    
+    Args:
+        transformed: List of transformed matrices T_i = normalize_rows(A_i + I)
+        skip_first_layer: If True, skip the first layer (layer 0) in the multiplication
+    
+    Returns:
+        Rollout matrix
+    """
+    if skip_first_layer and len(transformed) > 1:
+        # Skip first layer, start from second layer
+        transformed_subset = transformed[1:]
+    else:
+        transformed_subset = transformed
+    
+    if not transformed_subset:
+        raise ValueError("No transformed matrices available for rollout")
+    
+    # Multiply matrices in order: T_N * T_{N-1} * ... * T_1 (or T_0 if not skipping)
+    # Start from the last layer and multiply backward
+    rollout = transformed_subset[-1]  # Start with last layer
+    for i in range(len(transformed_subset) - 2, -1, -1):  # Go backward from second-to-last to first
+        rollout = np.dot(rollout, transformed_subset[i])
+    
+    return rollout
+
+
 def compute_rollout(run_dir, video_id, refiner_id):
-    """Compute attention rollout: T_6 * T_5 * ... * T_0 where T_i = normalize_rows(A_i + I)."""
+    """Compute attention rollout: T_6 * T_5 * ... * T_0 where T_i = normalize_rows(A_i + I).
+    
+    Returns:
+        Tuple of (rollout_full, rollout_no_layer0, layer_names, attention_matrices, transformed)
+    """
     arrays, meta = load_attention_for_video(run_dir, video_id)
     sorted_layers, layer_to_keys = get_all_layers_sorted(meta)
     
@@ -196,13 +303,15 @@ def compute_rollout(run_dir, video_id, refiner_id):
         T_i = normalize_rows(T_i)  # Row normalize after adding identity
         transformed.append(T_i)
     
-    # Multiply matrices in order: T_6 * T_5 * ... * T_0 (or last * ... * first)
-    # Start from the last layer (highest index) and multiply backward
-    rollout = transformed[-1]  # Start with T_N (last layer)
-    for i in range(len(transformed) - 2, -1, -1):  # Go backward from T_{N-1} to T_0
-        rollout = np.dot(rollout, transformed[i])
+    # Compute full rollout (T_6 * T_5 * ... * T_0)
+    rollout_full = compute_rollout_from_transformed(transformed, skip_first_layer=False)
     
-    return rollout, layer_names, attention_matrices, transformed
+    # Compute rollout without layer 0 (T_6 * T_5 * ... * T_1)
+    rollout_no_layer0 = None
+    if len(transformed) > 1:
+        rollout_no_layer0 = compute_rollout_from_transformed(transformed, skip_first_layer=True)
+    
+    return rollout_full, rollout_no_layer0, layer_names, attention_matrices, transformed
 
 
 def main():
@@ -227,12 +336,62 @@ def main():
             continue
         refiner_id = int(pred["refiner_id"])
         try:
-            rollout, layer_names, attention_matrices, transformed = compute_rollout(run_dir, vid, refiner_id)
+            rollout_full, rollout_no_layer0, layer_names, attention_matrices, transformed = compute_rollout(run_dir, vid, refiner_id)
             
-            # Save rollout matrix as npz
+            # Process full rollout (with layer 0)
+            col_avg = rollout_full.mean(axis=0)
+            col_min = col_avg.min()
+            col_max = col_avg.max()
+            if col_max > col_min:
+                col_avg_norm = (col_avg - col_min) / (col_max - col_min)
+            else:
+                col_avg_norm = np.ones_like(col_avg)
+            
+            # Save full rollout matrix as npz
             rollout_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout.npz")
-            np.savez_compressed(rollout_path, rollout=rollout)
+            np.savez_compressed(rollout_path, rollout=rollout_full)
             print(f"Saved rollout matrix to {rollout_path}")
+            
+            # Save column averages as npz
+            col_avg_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout_col_avg.npz")
+            np.savez_compressed(col_avg_path, col_avg=col_avg)
+            print(f"Saved column averages to {col_avg_path}")
+            print(f"  Column averages: min={col_avg.min():.4f}, max={col_avg.max():.4f}, mean={col_avg.mean():.4f}")
+            
+            # Save normalized column averages as npz
+            col_avg_norm_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout_col_avg_norm.npz")
+            np.savez_compressed(col_avg_norm_path, col_avg_norm=col_avg_norm)
+            print(f"Saved normalized column averages to {col_avg_norm_path}")
+            print(f"  Normalized column averages: min={col_avg_norm.min():.4f}, max={col_avg_norm.max():.4f}, mean={col_avg_norm.mean():.4f}")
+            
+            # Process rollout without layer 0 (if available)
+            if rollout_no_layer0 is not None:
+                col_avg_no_layer0 = rollout_no_layer0.mean(axis=0)
+                col_min_no_layer0 = col_avg_no_layer0.min()
+                col_max_no_layer0 = col_avg_no_layer0.max()
+                if col_max_no_layer0 > col_min_no_layer0:
+                    col_avg_norm_no_layer0 = (col_avg_no_layer0 - col_min_no_layer0) / (col_max_no_layer0 - col_min_no_layer0)
+                else:
+                    col_avg_norm_no_layer0 = np.ones_like(col_avg_no_layer0)
+                
+                # Save rollout matrix without layer 0 as npz
+                rollout_no_layer0_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout_nolayer0.npz")
+                np.savez_compressed(rollout_no_layer0_path, rollout=rollout_no_layer0)
+                print(f"Saved rollout matrix (no layer 0) to {rollout_no_layer0_path}")
+                
+                # Save column averages without layer 0 as npz
+                col_avg_no_layer0_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout_nolayer0_col_avg.npz")
+                np.savez_compressed(col_avg_no_layer0_path, col_avg=col_avg_no_layer0)
+                print(f"Saved column averages (no layer 0) to {col_avg_no_layer0_path}")
+                
+                # Save normalized column averages without layer 0 as npz
+                col_avg_norm_no_layer0_path = os.path.join(out_maps_dir, f"video_{vid}_refiner_{refiner_id}_rollout_nolayer0_col_avg_norm.npz")
+                np.savez_compressed(col_avg_norm_no_layer0_path, col_avg_norm=col_avg_norm_no_layer0)
+                print(f"Saved normalized column averages (no layer 0) to {col_avg_norm_no_layer0_path}")
+                print(f"  Column averages (no layer 0): min={col_avg_no_layer0.min():.4f}, max={col_avg_no_layer0.max():.4f}, mean={col_avg_no_layer0.mean():.4f}")
+                print(f"  Normalized column averages (no layer 0): min={col_avg_norm_no_layer0.min():.4f}, max={col_avg_norm_no_layer0.max():.4f}, mean={col_avg_norm_no_layer0.mean():.4f}")
+            else:
+                print(f"Warning: Only one layer found, cannot compute rollout without layer 0")
         except FileNotFoundError as e:
             print(str(e))
         except Exception as e:
