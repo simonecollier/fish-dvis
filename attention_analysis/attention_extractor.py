@@ -6,11 +6,12 @@ import math
 class RefinerAttentionHook:
     """Hook to capture attention weights from refiner MultiheadAttention layers."""
     
-    def __init__(self, layer_name, attention_module, sink_list=None):
+    def __init__(self, layer_name, attention_module, sink_list=None, extractor=None):
         self.layer_name = layer_name
         self.attention_module = attention_module
         self.refiner_attention_maps = []
         self._sink_list = sink_list
+        self._extractor = extractor  # Reference to extractor for immediate saving
     
     def __call__(self, module, input, output):
         """Capture attention weights from the forward pass."""
@@ -19,15 +20,254 @@ class RefinerAttentionHook:
             attn_output, attn_weights = output[0], output[1]
             
             if attn_weights is not None:
+                # Convert to numpy immediately to free GPU memory
+                attn_weights_np = attn_weights.detach().cpu().numpy()
+                
                 # Store attention weights with layer information
                 entry = {
                     'layer': self.layer_name,
-                    'attention_weights': attn_weights.detach().clone(),
+                    'attention_weights': attn_weights_np,  # Store as numpy array
                     'shape': attn_weights.shape
                 }
-                self.refiner_attention_maps.append(entry)
-                if self._sink_list is not None:
-                    self._sink_list.append(entry)
+                
+                # Debug: print when we capture attention
+                print(f"[REFINER_HOOK] Captured attention from {self.layer_name}, shape: {attn_weights.shape}, save_immediately: {self._extractor.save_immediately_from_hook if self._extractor else False}", flush=True)
+                
+                # Save immediately from hook if enabled (prevents accumulation)
+                if self._extractor is not None and self._extractor.save_immediately_from_hook:
+                    # Save directly to disk without accumulating in lists
+                    self._save_from_hook(entry)
+                else:
+                    # Store entry in sink list (will be cleared after saving)
+                    self.refiner_attention_maps.append(entry)
+                    if self._sink_list is not None:
+                        self._sink_list.append(entry)
+    
+    def _save_from_hook(self, entry):
+        """Save attention map directly from hook without accumulating in lists."""
+        if self._extractor is None:
+            print(f"[REFINER_HOOK] {self.layer_name} - Cannot save: extractor is None", flush=True)
+            return
+        if not self._extractor._output_dir:
+            print(f"[REFINER_HOOK] {self.layer_name} - Cannot save: output_dir is not set (value: {self._extractor._output_dir})", flush=True)
+            return
+        
+        try:
+            import os
+            
+            # Get video context if available
+            video_context = self._extractor._current_video_context
+            if video_context is not None:
+                video_id = video_context.get('video_id', 'unknown')
+                frame_idx = video_context.get('frame_idx', None)
+                frame_start = video_context.get('frame_start', None)
+                frame_end = video_context.get('frame_end', None)
+                window_idx = video_context.get('window_idx', None)
+            else:
+                video_id = 'unknown'
+                frame_idx = None
+                frame_start = None
+                frame_end = None
+                window_idx = None
+            
+            attn_dir = os.path.join(self._extractor._output_dir, "attention_maps")
+            os.makedirs(attn_dir, exist_ok=True)
+            
+            # Build filename with video context
+            # Extract layer index from layer name (e.g., "transformer_time_self_attention_layers.0.self_attn" -> 0)
+            layer_idx = None
+            if 'transformer_time_self_attention_layers.' in self.layer_name:
+                try:
+                    layer_idx = int(self.layer_name.split('transformer_time_self_attention_layers.')[1].split('.')[0])
+                except (ValueError, IndexError):
+                    pass
+            
+            # For refiner attention, check if frame_idx is a list (all frames)
+            # The refiner processes all frames at once, not per window
+            # So if frame_idx is a list, use the full range from the list
+            if isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
+                # Use the full frame range from the list
+                actual_frame_start = min(frame_idx)
+                actual_frame_end = max(frame_idx)
+                if layer_idx is not None:
+                    filename = f"video_{video_id}_frames{actual_frame_start}-{actual_frame_end}_refiner_temporal_layer_{layer_idx}_attn"
+                else:
+                    filename = f"video_{video_id}_frames{actual_frame_start}-{actual_frame_end}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+            elif frame_start is not None and frame_end is not None:
+                # Fall back to window-level frame range if frame_idx is not a list
+                if layer_idx is not None:
+                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_refiner_temporal_layer_{layer_idx}_attn"
+                else:
+                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+            elif frame_idx is not None:
+                # Single frame index
+                if isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
+                    frame_idx = frame_idx[0]
+                if layer_idx is not None:
+                    filename = f"video_{video_id}_frame_{frame_idx}_refiner_temporal_layer_{layer_idx}_attn"
+                else:
+                    filename = f"video_{video_id}_frame_{frame_idx}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+            else:
+                if layer_idx is not None:
+                    filename = f"video_{video_id}_unknown_refiner_temporal_layer_{layer_idx}_attn"
+                else:
+                    filename = f"video_{video_id}_unknown_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+            
+            # Add video context to entry
+            entry['video_id'] = video_id
+            entry['frame_idx'] = frame_idx
+            entry['frame_start'] = frame_start
+            entry['frame_end'] = frame_end
+            entry['window_idx'] = window_idx
+            entry['source'] = 'refiner_temporal'
+            
+            # Save synchronously to disk
+            if self._extractor is not None:
+                print(f"[REFINER_HOOK] Saving {filename} to {attn_dir}", flush=True)
+                self._extractor._save_synchronously(entry, filename, attn_dir)
+                print(f"[REFINER_HOOK] Successfully saved {filename}", flush=True)
+        except Exception as e:
+            import logging
+            import traceback
+            error_msg = f"Failed to save refiner attention from hook: {e}\n{traceback.format_exc()}"
+            logging.getLogger(__name__).warning(error_msg)
+            print(f"[REFINER_HOOK] ERROR: {error_msg}", flush=True)
+
+
+class TrackerAttentionHook:
+    """Hook to capture attention weights from tracker attention layers."""
+    
+    def __init__(self, layer_name, layer_idx, attention_type, attention_module, sink_list=None, extractor=None):
+        self.layer_name = layer_name
+        self.layer_idx = layer_idx
+        self.attention_type = attention_type  # 'cross', 'self', or 'slot_cross'
+        self.attention_module = attention_module
+        self.attention_maps = []
+        self._sink_list = sink_list
+        self._extractor = extractor  # Reference to extractor for immediate saving
+    
+    def __call__(self, module, input, output):
+        """Capture attention weights from the forward pass."""
+        # Debug: print output type to understand what we're getting
+        # print(f"[TRACKER_HOOK] {self.layer_name} output type: {type(output)}, is_tuple: {isinstance(output, tuple)}, len: {len(output) if isinstance(output, tuple) else 'N/A'}")
+        
+        if isinstance(output, tuple) and len(output) >= 2:
+            # MultiheadAttention returns (attn_output, attn_output_weights)
+            attn_output, attn_weights = output[0], output[1]
+            
+            if attn_weights is not None:
+                # Convert to numpy immediately to free GPU memory
+                attn_weights_np = attn_weights.detach().cpu().numpy()
+                
+                # Get tracker_id -> sequence_id mapping from the tracker
+                tracker_id_to_seq_id = None
+                if self._extractor is not None:
+                    tracker_id_to_seq_id = self._extractor._get_tracker_id_mapping()
+                
+                entry = {
+                    'layer': self.layer_name,
+                    'layer_idx': self.layer_idx,
+                    'attention_type': self.attention_type,
+                    'attention_weights': attn_weights_np,  # Store as numpy array
+                    'shape': attn_weights.shape,
+                    'tracker_id_to_seq_id': tracker_id_to_seq_id,  # Mapping: tracker_id (index) -> sequence_id
+                    'source': 'tracker'
+                }
+                
+                # Debug: print when we capture attention
+                print(f"[TRACKER_HOOK] Captured attention from {self.layer_name}, shape: {attn_weights.shape}, save_immediately: {self._extractor.save_immediately_from_hook if self._extractor else False}", flush=True)
+                
+                # Save immediately from hook if enabled
+                if self._extractor is not None and self._extractor.save_immediately_from_hook:
+                    self._save_from_hook(entry)
+                else:
+                    # Store entry in sink list
+                    if self._sink_list is not None:
+                        self._sink_list.append(entry)
+                    else:
+                        self.attention_maps.append(entry)
+            else:
+                # Debug: print when attn_weights is None
+                print(f"[TRACKER_HOOK] {self.layer_name} - attn_weights is None (need_weights might be False)", flush=True)
+        else:
+            # Debug: print when output format is unexpected
+            print(f"[TRACKER_HOOK] {self.layer_name} - Unexpected output format: type={type(output)}, is_tuple={isinstance(output, tuple)}, len={len(output) if isinstance(output, (tuple, list)) else 'N/A'}", flush=True)
+    
+    def _save_from_hook(self, entry):
+        """Save attention map directly from hook without accumulating in lists."""
+        if self._extractor is None or not self._extractor._output_dir:
+            return
+        
+        try:
+            import os
+            import json
+            from detectron2.utils.file_io import PathManager
+            
+            # Get video context if available
+            video_context = self._extractor._current_video_context
+            if video_context is not None:
+                video_id = video_context.get('video_id', 'unknown')
+                frame_idx = video_context.get('frame_idx', None)
+                frame_start = video_context.get('frame_start', None)
+                frame_end = video_context.get('frame_end', None)
+                window_idx = video_context.get('window_idx', None)
+            else:
+                video_id = 'unknown'
+                frame_idx = None
+                frame_start = None
+                frame_end = None
+                window_idx = None
+            
+            # IMPORTANT: For tracker attention, use the current tracker frame index
+            # which is updated by the frame tracker hook. This ensures we get the correct
+            # frame index even if the video context hasn't been updated yet.
+            if self._extractor._current_tracker_frame_idx is not None:
+                frame_idx = self._extractor._current_tracker_frame_idx
+                print(f"[TRACKER_HOOK] Using tracker frame index: {frame_idx} (from frame tracker hook)", flush=True)
+            elif self._extractor._tracker_start_frame_id is not None:
+                # Fallback: if frame tracker hook hasn't fired yet, try to calculate from start_frame_id
+                # This shouldn't normally happen, but provides a safety net
+                print(f"[TRACKER_HOOK] Warning: _current_tracker_frame_idx is None, but start_frame_id={self._extractor._tracker_start_frame_id}. Using fallback.", flush=True)
+                # Don't use fallback - let it use frame_idx from context or frame range
+            
+            attn_dir = os.path.join(self._extractor._output_dir, "attention_maps")
+            os.makedirs(attn_dir, exist_ok=True)
+            
+            # Build filename with video context
+            attention_type_str = self.attention_type.replace('_', '_')
+            layer_idx = entry.get('layer_idx', 'unknown')
+            
+            # For tracker attention, prefer frame_idx if available (per-frame attention)
+            # Otherwise fall back to frame range (window-level)
+            if frame_idx is not None:
+                # Use single frame index for per-frame attention maps
+                if isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
+                    # If it's a list, use the first element (should be single frame for tracker)
+                    frame_idx = frame_idx[0]
+                filename = f"video_{video_id}_frame_{frame_idx}_tracker_{attention_type_str}_layer_{layer_idx}_attn"
+            elif frame_start is not None and frame_end is not None:
+                filename = f"video_{video_id}_frames{frame_start}-{frame_end}_tracker_{attention_type_str}_layer_{layer_idx}_attn"
+            else:
+                filename = f"video_{video_id}_unknown_tracker_{attention_type_str}_layer_{layer_idx}_attn"
+            
+            # Add video context to entry
+            entry['video_id'] = video_id
+            entry['frame_idx'] = frame_idx
+            entry['frame_start'] = frame_start
+            entry['frame_end'] = frame_end
+            entry['window_idx'] = window_idx
+            
+            # Save synchronously to disk
+            if self._extractor is not None:
+                print(f"[TRACKER_HOOK] Saving {filename} to {attn_dir}", flush=True)
+                self._extractor._save_synchronously(entry, filename, attn_dir)
+                print(f"[TRACKER_HOOK] Successfully saved {filename}", flush=True)
+        except Exception as e:
+            import logging
+            import traceback
+            error_msg = f"Failed to save tracker attention from hook: {e}\n{traceback.format_exc()}"
+            logging.getLogger(__name__).warning(error_msg)
+            print(f"[TRACKER_HOOK] ERROR: {error_msg}", flush=True)
 
 
 class PredictorCrossAttentionHook:
@@ -95,6 +335,9 @@ class PredictorCrossAttentionHook:
                     'source': 'predictor_cross_attn'
                 }
                 
+                # Debug: print when we capture attention
+                print(f"[PREDICTOR_HOOK] Captured attention from {self.layer_name}, shape: {attn_weights.shape}, save_immediately: {self._extractor.save_immediately_from_hook if self._extractor else False}", flush=True)
+                
                 # Save immediately from hook if enabled
                 if self._extractor is not None and self._extractor.save_immediately_from_hook:
                     self._save_from_hook(entry)
@@ -107,7 +350,11 @@ class PredictorCrossAttentionHook:
     
     def _save_from_hook(self, entry):
         """Save attention map directly from hook without accumulating in lists."""
-        if self._extractor is None or not self._extractor._output_dir:
+        if self._extractor is None:
+            print(f"[PREDICTOR_HOOK] {self.layer_name} - Cannot save: extractor is None", flush=True)
+            return
+        if not self._extractor._output_dir:
+            print(f"[PREDICTOR_HOOK] {self.layer_name} - Cannot save: output_dir is not set (value: {self._extractor._output_dir})", flush=True)
             return
         
         try:
@@ -199,279 +446,45 @@ class PredictorCrossAttentionHook:
             
             # Save synchronously to disk
             if self._extractor is not None:
+                print(f"[PREDICTOR_HOOK] Saving {filename} to {attn_dir}", flush=True)
                 self._extractor._save_synchronously(entry, filename, attn_dir)
+                print(f"[PREDICTOR_HOOK] Successfully saved {filename}", flush=True)
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"Failed to save predictor cross-attention from hook: {e}")
-
-
-class ViTAttentionHook:
-    """Hook to capture spatial attention maps from ViT backbone Attention layers."""
-    
-    def __init__(self, layer_name, attention_module, sink_list=None, extractor=None):
-        self.layer_name = layer_name
-        self.attention_module = attention_module
-        self.attention_maps = []
-        self._sink_list = sink_list
-        self._original_forward = None
-        self._extractor = extractor  # Reference to extractor for immediate saving
-        self._save_counter = 0  # Counter for immediate saves
-        
-    def _hook_forward(self, x):
-        """Wrapped forward method that captures attention weights."""
-        # Handle both formats: (B, H, W, C) from detectron2 ViT or (B, N, C) from adapter
-        if len(x.shape) == 4:
-            # Standard detectron2 ViT format: (B, H, W, C)
-            B, H, W, C = x.shape
-            N = H * W
-            is_sequence_format = False
-        elif len(x.shape) == 3:
-            # Adapter format: (B, N, C)
-            B, N, C = x.shape
-            # Try to infer H, W from N (assuming square patches)
-            # For ViT-L with 16x16 patches: N = H_patches * W_patches
-            # We can't know exact H, W without additional info, so we'll use None
-            H = W = None
-            is_sequence_format = True
-        else:
-            # Fallback: call original forward
-            return self._original_forward(x)
-        
-        num_heads = self.attention_module.num_heads
-        scale = self.attention_module.scale
-        
-        if is_sequence_format:
-            # Adapter format: (B, N, C) -> compute attention in sequence format
-            qkv = self.attention_module.qkv(x).reshape(B, N, 3, num_heads, C // num_heads).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv[0] * scale, qkv[1], qkv[2]
-            
-            # Compute attention scores
-            attn = q @ k.transpose(-2, -1)
-            
-            # Apply softmax to get attention weights
-            attn_weights = attn.softmax(dim=-1)
-            
-            # Store attention weights BEFORE dropout (for visualization purposes)
-            # Convert to numpy immediately - this frees GPU tensor memory
-            # Shape will be (B, num_heads, N, N)
-            # Note: .numpy() creates a view if possible, but detach().cpu() ensures it's separate
-            attn_weights_np = attn_weights.detach().cpu().numpy()
-            entry = {
-                'layer': self.layer_name,
-                'attention_weights': attn_weights_np,  # Store as numpy array (no tensor overhead)
-                'shape': attn_weights.shape,
-                'spatial_shape': None,  # Cannot determine H, W from sequence format
-                'sequence_length': N,
-                'num_heads': num_heads
-            }
-            # Save immediately from hook if enabled (prevents accumulation)
-            if self._extractor is not None and self._extractor.save_immediately_from_hook:
-                # Save directly to disk without accumulating in lists
-                self._save_from_hook(entry)
-            else:
-                # Store entry in sink list (will be cleared after saving)
-                if self._sink_list is not None:
-                    self._sink_list.append(entry)
-                else:
-                    self.attention_maps.append(entry)
-            # Tensor is freed automatically when we convert to numpy
-            # The numpy array is stored in entry, so don't delete it here
-            
-            # Apply attention dropout (for training/inference consistency)
-            if hasattr(self.attention_module, 'attn_drop'):
-                attn_weights = self.attention_module.attn_drop(attn_weights)
-            
-            # Continue with original computation
-            x_out = (attn_weights @ v).transpose(1, 2).reshape(B, N, C)
-            x_out = self.attention_module.proj(x_out)
-            if hasattr(self.attention_module, 'proj_drop'):
-                x_out = self.attention_module.proj_drop(x_out)
-            
-            return x_out
-        else:
-            # Standard detectron2 ViT format: (B, H, W, C)
-            # Compute QKV
-            qkv = self.attention_module.qkv(x).reshape(B, N, 3, num_heads, -1).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.reshape(3, B * num_heads, N, -1).unbind(0)
-            
-            # Compute attention scores
-            attn = (q * scale) @ k.transpose(-2, -1)
-            
-            # Add relative positional embeddings if used
-            if hasattr(self.attention_module, 'use_rel_pos') and self.attention_module.use_rel_pos:
-                try:
-                    from detectron2.modeling.backbone.utils import add_decomposed_rel_pos
-                    attn = add_decomposed_rel_pos(
-                        attn, q, 
-                        self.attention_module.rel_pos_h, 
-                        self.attention_module.rel_pos_w, 
-                        (H, W), (H, W)
-                    )
-                except ImportError:
-                    # If import fails, continue without relative positional embeddings
-                    pass
-            
-            # Apply softmax to get attention weights
-            attn_weights = attn.softmax(dim=-1)
-            
-            # Store attention weights BEFORE dropout (for visualization purposes)
-            # Convert to numpy immediately - this frees GPU tensor memory
-            attn_weights_np = attn_weights.detach().cpu().numpy()
-            entry = {
-                'layer': self.layer_name,
-                'attention_weights': attn_weights_np,  # Store as numpy array (no tensor overhead)
-                'shape': attn_weights.shape,
-                'spatial_shape': (H, W),  # Store spatial dimensions
-                'num_heads': num_heads
-            }
-            # Save immediately from hook if enabled (prevents accumulation)
-            if self._extractor is not None and self._extractor.save_immediately_from_hook:
-                # Save directly to disk without accumulating in lists
-                self._save_from_hook(entry)
-            else:
-                # Store entry in sink list (will be cleared after saving)
-                if self._sink_list is not None:
-                    self._sink_list.append(entry)
-                else:
-                    self.attention_maps.append(entry)
-            # Tensor is freed automatically when we convert to numpy
-            # The numpy array is stored in entry, so don't delete it here
-            
-            # Apply attention dropout (for training/inference consistency)
-            if hasattr(self.attention_module, 'attn_drop'):
-                attn_weights = self.attention_module.attn_drop(attn_weights)
-            
-            # Continue with original computation
-            x_out = (attn_weights @ v).view(B, num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
-            x_out = self.attention_module.proj(x_out)
-            if hasattr(self.attention_module, 'proj_drop'):
-                x_out = self.attention_module.proj_drop(x_out)
-            
-            return x_out
-    
-    def _save_from_hook(self, entry):
-        """Save attention map directly from hook without accumulating in lists."""
-        if self._extractor is None or not self._extractor._output_dir:
-            return
-        
-        try:
-            import os
-            
-            # Get video context if available (set before forward pass)
-            video_context = self._extractor._current_video_context
-            if video_context is not None:
-                video_id = video_context.get('video_id', 'unknown')
-                frame_idx = video_context.get('frame_idx', None)
-                frame_start = video_context.get('frame_start', None)
-                frame_end = video_context.get('frame_end', None)
-                window_idx = video_context.get('window_idx', None)
-            else:
-                # Fallback: no context available
-                video_id = 'unknown'
-                frame_idx = None
-                frame_start = None
-                frame_end = None
-                window_idx = None
-            
-            attn_dir = os.path.join(self._extractor._output_dir, "attention_maps")
-            os.makedirs(attn_dir, exist_ok=True)
-            
-            # Build filename with video context if available
-            # Extract layer index from layer name (e.g., "backbone.vit_module.blocks.5.attn" -> 5)
-            layer_idx = None
-            if 'blocks.' in self.layer_name:
-                try:
-                    layer_idx = int(self.layer_name.split('blocks.')[1].split('.')[0])
-                except (ValueError, IndexError):
-                    pass
-            
-            if frame_start is not None and frame_end is not None:
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_backbone_vit_layer_{layer_idx}_attn"
-                else:
-                    # Fallback to old format if layer index can't be extracted
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_layer_{self.layer_name.replace('.', '_')}_attn"
-            elif frame_idx is not None:
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_frame_{frame_idx}_backbone_vit_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_frame_{frame_idx}_layer_{self.layer_name.replace('.', '_')}_attn"
-            else:
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_unknown_backbone_vit_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_unknown_layer_{self.layer_name.replace('.', '_')}_attn"
-            
-            # Add video context to entry
-            entry['video_id'] = video_id
-            entry['frame_idx'] = frame_idx
-            entry['frame_start'] = frame_start
-            entry['frame_end'] = frame_end
-            entry['window_idx'] = window_idx
-            entry['source'] = 'backbone'
-            
-            # Save synchronously to disk
-            if self._extractor is not None:
-                self._extractor._save_synchronously(entry, filename, attn_dir)
-            else:
-                # Fallback: accumulate if extractor not available
-                if self._sink_list is not None:
-                    self._sink_list.append(entry)
-                else:
-                    self.attention_maps.append(entry)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Failed to save from hook: {e}")
-    
-    def __call__(self, module, input, output):
-        """Forward hook that wraps the attention module's forward method."""
-        # This hook is called before the forward pass
-        # We'll actually wrap the forward method instead
-        pass
-    
-    def register(self):
-        """Register the hook by wrapping the forward method."""
-        self._original_forward = self.attention_module.forward
-        self.attention_module.forward = self._hook_forward
-    
-    def unregister(self):
-        """Restore the original forward method."""
-        if self._original_forward is not None:
-            self.attention_module.forward = self._original_forward
-            self._original_forward = None
+            import traceback
+            error_msg = f"Failed to save predictor cross-attention from hook: {e}\n{traceback.format_exc()}"
+            logging.getLogger(__name__).warning(error_msg)
+            print(f"[PREDICTOR_HOOK] ERROR: {error_msg}", flush=True)
 
 
 class AttentionExtractor:
     """Class to manage attention extraction hooks and data saving."""
     
     def __init__(self, model, output_dir, max_accumulated_maps=100, 
-                 extract_backbone=True, extract_refiner=True, 
-                 backbone_layers_to_extract=None, save_immediately_from_hook=False,
-                 window_size=None):
+                 extract_refiner=True, save_immediately_from_hook=False,
+                 window_size=None, extract_backbone=None):
         """
         Args:
             model: The model to extract attention from
             output_dir: Directory to save attention maps
             max_accumulated_maps: Maximum attention maps to accumulate before warning
-            extract_backbone: If False, skip backbone attention extraction (saves memory)
             extract_refiner: If False, skip refiner attention extraction
-            backbone_layers_to_extract: List of layer indices to extract (e.g., [0, 5, 10, 15, 20, 23])
-                                        If None, extract all layers. Reduces memory usage.
             save_immediately_from_hook: If True, save directly from hook without accumulating in lists.
                                         This prevents RAM accumulation but requires thread-safe file writing.
+            window_size: Window size for video processing
+            extract_backbone: Deprecated parameter (kept for compatibility, ignored)
         """
         self.model = model
         self.output_dir = output_dir
         self.num_layers = 6  # DVIS-DAQ refiner has 6 layers
         self.refiner_hooks = []  # Hooks for refiner temporal attention
-        self.vit_hooks = []  # Separate list for ViT backbone hooks
         self.predictor_hooks = []  # Hooks for predictor cross-attention
+        self.tracker_hooks = []  # Hooks for tracker attention
         self.refiner_attention_data = []  # Refiner attention data
         self.refiner_attention_maps = []  # global sink for refiner temporal attention maps
-        self.backbone_attention_maps = []  # global sink for backbone attention maps
         self.predictor_attention_maps = []  # global sink for predictor cross-attention maps
+        self.tracker_attention_maps = []  # global sink for tracker attention maps
         self._current_predictor_info = None  # Store predictor forward info (size_list, num_feature_levels)
-        self._query_tracking_maps = {}  # Store query tracking: {video_id: {frame_idx: {seq_id: predictor_query_idx}}}
         self._refiner_id_to_seq_id_maps = {}  # Store refiner_id -> sequence_id mapping: {video_id: {window_key: [seq_id_0, seq_id_1, ...]}}
         self.video_attention_data = {}  # video_id -> attention_data
         self.current_video_id = None
@@ -481,17 +494,18 @@ class AttentionExtractor:
         self._save_immediately = True  # Save immediately to avoid accumulation
         self._max_accumulated_maps = max_accumulated_maps  # Max entries before forced clear
         self._current_accumulated = 0  # Track current accumulation
-        self.extract_backbone = extract_backbone
         self.extract_refiner = extract_refiner
-        self.backbone_layers_to_extract = backbone_layers_to_extract  # None = all layers
         self.save_immediately_from_hook = save_immediately_from_hook  # Save directly from hook
         self._current_video_context = None  # Current video_id/frame_idx for hooks to use
         self._window_counter_per_video = {}  # Track window index per video for frame range calculation
         self._window_size = window_size  # Store window_size from config (or None to get from model)
         self._total_frames_per_video = {}  # Track total frames per video (calculated once)
         self._total_windows_per_video = {}  # Track total windows per video (calculated once)
+        self._current_tracker_frame_idx = None  # Current frame index within tracker inference loop
+        self._tracker_start_frame_id = None  # Start frame ID for current tracker inference call
+        self._tracker_frame_counter = {}  # Track frame counter per video/window
         
-        # Register hooks for refiner attention layers and backbone
+        # Register hooks for refiner attention layers and predictor cross-attention
         self._register_hooks()
         
         # Register a pre-forward hook on the model to set video context before forward pass
@@ -506,13 +520,6 @@ class AttentionExtractor:
         # Register a forward hook on the predictor to capture spatial dimensions
         if hasattr(self.model, 'sem_seg_head') and hasattr(self.model.sem_seg_head, 'predictor'):
             self._predictor_forward_hook = self.model.sem_seg_head.predictor.register_forward_hook(self._predictor_forward_hook)
-        
-        # Register hooks on tracker to capture query mappings
-        if hasattr(self.model, 'tracker'):
-            self._tracker_match_hook = None
-            self._tracker_seq_id_hook = None
-            self._tracker_forward_hook = None
-            self._setup_tracker_hooks()
         
         # Hook into common_inference to capture final sequence ID mappings
         # This is where the final pred_ids are created from seq_id_list
@@ -530,17 +537,65 @@ class AttentionExtractor:
                     seq_id_list = result['seq_id_list']
                     self._store_refiner_id_mapping(seq_id_list)
                 
-                # After common_inference, capture:
-                # 1. The seq_id_list order (refiner_id -> sequence_id mapping) - done above
-                # 2. Final sequence ID to track query mappings
-                self._capture_final_sequence_mappings()
-                
                 return result
             
             self.model.common_inference = hooked_common_inference
             self._common_inference_hook = (self.model, original_common_inference)
         else:
             self._common_inference_hook = None
+        
+        # Hook into tracker's inference method to track frame index
+        if hasattr(self.model, 'tracker') and hasattr(self.model.tracker, 'inference'):
+            original_tracker_inference = self.model.tracker.inference
+            
+            def hooked_tracker_inference(frame_embeds, mask_features, frames_info, start_frame_id, resume=False, to_store="cpu"):
+                # Store the start_frame_id for this inference call
+                # IMPORTANT: Set this BEFORE calling original_tracker_inference so the frame tracker hook can read it
+                # start_frame_id is the absolute frame index where this window starts (e.g., 0 for window 0, 100 for window 1)
+                self._tracker_start_frame_id = start_frame_id
+                
+                # Get video_id from current context
+                video_id = None
+                if self._current_video_context is not None:
+                    video_id = self._current_video_context.get('video_id')
+                
+                print(f"[TRACKER_INFERENCE_HOOK] Called with start_frame_id={start_frame_id}, video_id={video_id}, resume={resume}", flush=True)
+                
+                # Create a unique key for this inference call (video_id + start_frame_id)
+                # Use a global counter key instead of per-window key, since frames should be numbered 0, 1, 2, ... across all windows
+                if video_id is not None:
+                    # Use video_id only as the key, so frame counter accumulates across windows
+                    inference_key = f"{video_id}_global"
+                    # Initialize or continue the global counter
+                    # IMPORTANT: The tracker processes all frames from 0 regardless of which window is being processed
+                    # So we always start the counter at -1 (so first frame becomes 0), not at start_frame_id - 1
+                    if inference_key not in self._tracker_frame_counter:
+                        # First time seeing this video - always start counter at -1
+                        # This ensures the first frame gets index 0, regardless of which window triggers the tracker
+                        self._tracker_frame_counter[inference_key] = -1
+                        print(f"[TRACKER_INFERENCE_HOOK] Initializing global frame counter for {inference_key}, starting at 0 (tracker processes all frames from beginning)", flush=True)
+                    else:
+                        # Counter already exists - continue counting from where we left off
+                        current_counter = self._tracker_frame_counter[inference_key]
+                        print(f"[TRACKER_INFERENCE_HOOK] Continuing global frame counter for {inference_key}, current value: {current_counter}, next frame will be {current_counter + 1}", flush=True)
+                
+                # Call original inference - the frame tracking will happen via the cross-attention hooks
+                # which will check self._current_tracker_frame_idx
+                result = original_tracker_inference(frame_embeds, mask_features, frames_info, start_frame_id, resume, to_store)
+                
+                # Clear frame tracking after inference completes
+                # Don't clear _current_tracker_frame_idx here - it's used by attention hooks that fire after inference
+                # Don't clear _tracker_start_frame_id here either - it might be needed for subsequent frames
+                # Only clear them when a new video starts (handled in model forward hook)
+                # Don't delete the global counter - it should persist across windows for the same video
+                print(f"[TRACKER_INFERENCE_HOOK] Completed inference for start_frame_id={start_frame_id}, global counter value: {self._tracker_frame_counter.get(f'{video_id}_global', 'N/A')}", flush=True)
+                
+                return result
+            
+            self.model.tracker.inference = hooked_tracker_inference
+            self._tracker_inference_hook = (self.model.tracker, original_tracker_inference)
+        else:
+            self._tracker_inference_hook = None
     
     def _model_forward_pre_hook(self, module, input):
         """Pre-forward hook on model to extract video_id from inputs and set context."""
@@ -714,232 +769,48 @@ class AttentionExtractor:
             # Also print for debugging
             print(f"[PREDICTOR_HOOK] Error capturing predictor info: {e}")
     
-    def _setup_tracker_hooks(self):
-        """Set up hooks on tracker to capture query mappings (track query → predictor query)."""
-        try:
-            tracker = self.model.tracker
-            
-            # Hook into match_with_embeds to capture sq_id_for_tq mapping
-            original_match_with_embeds = tracker.match_with_embeds
-            
-            def hooked_match_with_embeds(trc_queries_feat, seg_queries_feat):
-                # Call original method
-                sq_id_for_tq = original_match_with_embeds(trc_queries_feat, seg_queries_feat)
-                
-                # Store the mapping (will log only when creating new mappings)
-                self._capture_query_mapping(sq_id_for_tq)
-                
-                return sq_id_for_tq
-            
-            tracker.match_with_embeds = hooked_match_with_embeds
-            self._tracker_match_hook = (tracker, original_match_with_embeds)
-            
-            # Hook into forward_offline_mode to capture sequence IDs after they're assigned
-            # We need to capture last_seq_ids after each frame is processed
-            if hasattr(tracker, 'forward_offline_mode'):
-                original_forward_offline = tracker.forward_offline_mode
-                
-                def hooked_forward_offline(*args, **kwargs):
-                    # Get parameters
-                    resume = kwargs.get('resume', False) if 'resume' in kwargs else (args[4] if len(args) > 4 else False)
-                    start_frame_id = kwargs.get('start_frame_id', None) if 'start_frame_id' in kwargs else (args[3] if len(args) > 3 else None)
-                    
-                    # Get frame_embeds to determine window size
-                    # frame_embeds is passed as first positional arg with shape (b, c, t, q)
-                    # where t is the number of frames in this window
-                    frame_embeds = kwargs.get('frame_embeds', None) if 'frame_embeds' in kwargs else (args[0] if len(args) > 0 else None)
-                    
-                    # Calculate actual frame range for this window based on start_frame_id and frame_embeds shape
-                    if start_frame_id is not None and frame_embeds is not None:
-                        if hasattr(frame_embeds, 'shape') and len(frame_embeds.shape) == 4:
-                            # frame_embeds shape is (b, c, t, q) where:
-                            # b = batch size (typically 1)
-                            # c = channels
-                            # t = number of frames in this window
-                            # q = number of queries
-                            T = frame_embeds.shape[2]  # t dimension
-                            
-                            actual_frame_start = start_frame_id
-                            actual_frame_end = start_frame_id + T - 1
-                            
-                            # Update video context based on actual frame range
-                            video_context = self._current_video_context
-                            if video_context is not None:
-                                video_id = video_context.get('video_id')
-                                if video_id is not None:
-                                    # Update the video context with the correct frame range
-                                    self.set_video_context(
-                                        video_id=video_id,
-                                        frame_idx=video_context.get('frame_idx'),
-                                        frame_start=actual_frame_start,
-                                        frame_end=actual_frame_end,
-                                        window_idx=video_context.get('window_idx'),
-                                        forward_pass_id=None
-                                    )
-                    
-                    # Debug: log when forward_offline_mode is called (once per window)
-                    video_context = self._current_video_context
-                    if video_context is not None:
-                        video_id = video_context.get('video_id')
-                        frame_start = video_context.get('frame_start')
-                        frame_end = video_context.get('frame_end')
-                        print(
-                            f"[FORWARD_OFFLINE] video_id={video_id}, frames={frame_start}-{frame_end}, "
-                            f"start_frame_id={start_frame_id}, resume={resume}",
-                            flush=True
-                        )
-                    else:
-                        print(
-                            f"[FORWARD_OFFLINE] video_context=None, start_frame_id={start_frame_id}, resume={resume}",
-                            flush=True
-                        )
-                    
-                    # Call original method
-                    result = original_forward_offline(*args, **kwargs)
-                    
-                    # After processing, try to update last_seq_ids for all recent mappings
-                    # This ensures we capture sequence IDs that were assigned during processing
-                    self._update_all_recent_mappings()
-                    
-                    return result
-                
-                tracker.forward_offline_mode = hooked_forward_offline
-                self._tracker_forward_hook = (tracker, original_forward_offline)
-            else:
-                self._tracker_forward_hook = None
-            
-            # Also hook into inference() method in case it's used instead of forward_offline_mode
-            # This might be called for the first window
-            if hasattr(tracker, 'inference'):
-                original_inference = tracker.inference
-                
-                def hooked_inference(*args, **kwargs):
-                    # Debug: log when inference is called
-                    video_context = self._current_video_context
-                    resume = kwargs.get('resume', False) if 'resume' in kwargs else (args[4] if len(args) > 4 else False)
-                    start_frame_id = kwargs.get('start_frame_id', None) if 'start_frame_id' in kwargs else (args[3] if len(args) > 3 else None)
-                    
-                    if video_context is not None:
-                        video_id = video_context.get('video_id')
-                        frame_start = video_context.get('frame_start')
-                        frame_end = video_context.get('frame_end')
-                        print(
-                            f"[TRACKER_INFERENCE] video_id={video_id}, frames={frame_start}-{frame_end}, "
-                            f"start_frame_id={start_frame_id}, resume={resume}",
-                            flush=True
-                        )
-                    else:
-                        print(
-                            f"[TRACKER_INFERENCE] video_context=None, start_frame_id={start_frame_id}, resume={resume}",
-                            flush=True
-                        )
-                    
-                    # Call original method
-                    result = original_inference(*args, **kwargs)
-                    
-                    # After processing, try to update last_seq_ids for all recent mappings
-                    # This ensures we capture sequence IDs that were assigned during processing
-                    self._update_all_recent_mappings()
-                    
-                    return result
-                
-                tracker.inference = hooked_inference
-                self._tracker_inference_hook = (tracker, original_inference)
-            else:
-                self._tracker_inference_hook = None
-            
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Could not set up tracker hooks: {e}")
     
-    def _update_all_recent_mappings(self):
-        """Update last_seq_ids for all recent mappings after frame processing.
+    
+    def _get_tracker_id_mapping(self):
+        """Get the tracker_id -> sequence_id mapping from the tracker.
         
-        This is called after forward_offline_mode completes, so we can capture
-        the final last_seq_ids for the window that was just processed.
+        When cross-attention is computed, the queries are: trc_det_queries = cat([track_queries, new_ins_embeds])
+        - The first len(track_queries) queries correspond to last_seq_ids (from previous frame)
+        - The remaining queries are new instances that don't have seq_ids yet
         
-        We also capture all sequence IDs from video_ins_hub to have a complete
-        picture of all sequence IDs that exist.
-        
-        IMPORTANT: This is called once per window, after all frames in that window
-        are processed. We need to update the mapping for the current window.
+        Returns:
+            dict or None: Mapping where:
+                - Keys are tracker query indices (0, 1, 2, ...)
+                - Values are sequence_ids (int) for track queries, or None for new queries
+                - Also includes 'num_track_queries' key indicating how many queries have seq_ids
         """
         try:
-            tracker = getattr(self.model, 'tracker', None)
-            if tracker is None:
-                return
+            if not hasattr(self.model, 'tracker'):
+                return None
             
-            # Update all mappings for the current video
-            video_context = self._current_video_context
-            if video_context is None:
-                return
+            tracker = self.model.tracker
+            if not hasattr(tracker, 'last_seq_ids') or tracker.last_seq_ids is None:
+                return None
             
-            video_id = video_context.get('video_id')
-            if video_id is None:
-                return
+            # Get the number of track queries (these have sequence IDs)
+            num_track_queries = len(tracker.last_seq_ids) if tracker.last_seq_ids is not None else 0
             
-            if video_id not in self._query_tracking_maps:
-                return
+            # Build mapping: tracker_id (index) -> sequence_id
+            # For track queries (indices 0 to num_track_queries-1), we have seq_ids
+            # For new queries (beyond num_track_queries), we don't have seq_ids yet
+            mapping = {}
+            if tracker.last_seq_ids is not None:
+                for i, seq_id in enumerate(tracker.last_seq_ids):
+                    mapping[i] = seq_id
             
-            frames = self._query_tracking_maps[video_id]
-            if not frames:
-                return
+            # Also store the number of track queries for reference
+            mapping['num_track_queries'] = num_track_queries
             
-            # Get frame_start and frame_end from context to find the right window
-            frame_start = video_context.get('frame_start')
-            frame_end = video_context.get('frame_end')
-            
-            if frame_start is not None and frame_end is not None:
-                frame_key = f"frames_{frame_start}_{frame_end}"
-            else:
-                # Fallback: use the most recently added frame_key
-                frame_keys = list(frames.keys())
-                if not frame_keys:
-                    return
-                frame_key = frame_keys[-1]
-            
-            # If the mapping doesn't exist yet, create it
-            # This can happen for the first window if match_with_embeds wasn't called for frame 0
-            # But match_with_embeds should be called for frames 1-99, so we should have sq_id_for_tq
-            # If we don't have it, we'll create a placeholder and try to get sq_id_for_tq from the tracker
-            if frame_key not in frames:
-                # Try to get sq_id_for_tq from the most recent match_with_embeds call
-                # We can't directly access it, but we can create a placeholder
-                # The sq_id_for_tq will be captured when match_with_embeds is called for frames 1-99
-                frames[frame_key] = {
-                    'frame_start': frame_start,
-                    'frame_end': frame_end,
-                    'frame_idx': video_context.get('frame_idx'),
-                    'sq_id_for_tq': None,  # Will be set when match_with_embeds is called
-                    'num_track_queries': 0
-                }
-            else:
-                # If mapping exists but sq_id_for_tq is None, we might need to wait for match_with_embeds
-                # But since this is called after forward_offline_mode, match_with_embeds should have been called
-                # So if sq_id_for_tq is still None, it means match_with_embeds wasn't called for this window
-                # This can happen for the first frame of the first window
-                pass
-            
-            # Try to capture last_seq_ids (active track queries for last frame)
-            if hasattr(tracker, 'last_seq_ids'):
-                last_seq_ids = tracker.last_seq_ids
-                if last_seq_ids is not None and len(last_seq_ids) > 0:
-                    frames[frame_key]['last_seq_ids'] = (
-                        last_seq_ids if isinstance(last_seq_ids, list) else last_seq_ids.tolist()
-                    )
-            
-            # Also capture all sequence IDs from video_ins_hub
-            # This gives us all sequence IDs that exist, not just active ones
-            # The refiner_id in results comes from video_ins_hub, so this helps us match
-            if hasattr(tracker, 'video_ins_hub'):
-                all_seq_ids = list(tracker.video_ins_hub.keys())
-                if all_seq_ids:
-                    frames[frame_key]['all_seq_ids_from_hub'] = (
-                        sorted(all_seq_ids) if isinstance(all_seq_ids[0], (int, float)) else sorted([int(x) for x in all_seq_ids])
-                    )
+            return mapping
         except Exception as e:
             import logging
-            logging.getLogger(__name__).debug(f"Could not update recent mappings: {e}")
+            logging.getLogger(__name__).debug(f"Could not get tracker_id mapping: {e}")
+            return None
     
     def _store_refiner_id_mapping(self, seq_id_list):
         """Store the refiner_id -> sequence_id mapping for the current window."""
@@ -973,214 +844,6 @@ class AttentionExtractor:
             import logging
             logging.getLogger(__name__).debug(f"Could not store refiner_id mapping: {e}")
     
-    def _capture_final_sequence_mappings(self):
-        """Capture final sequence ID mappings from video_ins_hub at the end of common_inference.
-        
-        This is called after all windows are processed, so we can capture the final
-        mapping between sequence IDs and their positions in the final output.
-        """
-        try:
-            tracker = getattr(self.model, 'tracker', None)
-            if tracker is None:
-                return
-            
-            if not hasattr(tracker, 'video_ins_hub'):
-                return
-            
-            video_context = self._current_video_context
-            if video_context is None:
-                return
-            
-            video_id = video_context.get('video_id')
-            if video_id is None:
-                return
-            
-            if video_id not in self._query_tracking_maps:
-                return
-            
-            # Get all sequence IDs from video_ins_hub (these are the refiner_ids in final output)
-            all_seq_ids = list(tracker.video_ins_hub.keys())
-            
-            # For each window, try to map sequence IDs to track query positions
-            # We need to find which track query position each sequence ID had in each window
-            frames = self._query_tracking_maps[video_id]
-            
-            for frame_key, mapping in frames.items():
-                last_seq_ids = mapping.get('last_seq_ids')
-                sq_id_for_tq = mapping.get('sq_id_for_tq')
-                
-                if last_seq_ids is None or sq_id_for_tq is None:
-                    continue
-                
-                # Create a mapping: seq_id -> (track_query_idx, predictor_query_id)
-                # IMPORTANT: We need sq_id_for_tq to create this mapping
-                # If sq_id_for_tq is None, we can't create the mapping, but we can still store last_seq_ids
-                seq_id_to_query = {}
-                if sq_id_for_tq is not None:
-                    for track_query_idx, seq_id in enumerate(last_seq_ids):
-                        if track_query_idx < len(sq_id_for_tq):
-                            predictor_query_id = int(sq_id_for_tq[track_query_idx])
-                            seq_id_to_query[seq_id] = {
-                                'track_query_idx': track_query_idx,
-                                'predictor_query_id': predictor_query_id
-                            }
-                    
-                    # Store this mapping for later lookup
-                    mapping['seq_id_to_query_mapping'] = seq_id_to_query
-                else:
-                    # If sq_id_for_tq is None, we can't create the mapping yet
-                    # This can happen for the first window if match_with_embeds wasn't called
-                    # We'll store last_seq_ids anyway, and the mapping will be created when sq_id_for_tq is available
-                    import logging
-                    logging.getLogger(__name__).debug(
-                        f"Window {frame_key}: sq_id_for_tq is None, cannot create seq_id_to_query_mapping. "
-                        f"last_seq_ids={last_seq_ids is not None}"
-                    )
-                
-                mapping['all_seq_ids_from_hub'] = sorted(all_seq_ids) if all_seq_ids else []
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug(f"Could not capture final sequence mappings: {e}")
-    
-    def _capture_query_mapping(self, sq_id_for_tq):
-        """Capture the mapping from track query indices to predictor query indices.
-        
-        Args:
-            sq_id_for_tq: Tensor of shape (num_track_queries + 1,) where sq_id_for_tq[i] 
-                         is the predictor query index for track query i (last is background)
-        """
-        try:
-            # Get current video context
-            video_context = self._current_video_context
-            if video_context is None:
-                print("[QUERY_MAPPING] video_context is None, skipping", flush=True)
-                return
-            
-            video_id = video_context.get('video_id')
-            frame_idx = video_context.get('frame_idx')
-            frame_start = video_context.get('frame_start')
-            frame_end = video_context.get('frame_end')
-            
-            if video_id is None:
-                print("[QUERY_MAPPING] video_id is None, skipping", flush=True)
-                return
-            
-            # Convert to numpy for storage
-            if isinstance(sq_id_for_tq, torch.Tensor):
-                sq_id_for_tq_np = sq_id_for_tq.detach().cpu().numpy()
-            else:
-                sq_id_for_tq_np = sq_id_for_tq
-            
-            # Store mapping
-            # Use frame_start-frame_end as key if available, otherwise frame_idx
-            # Note: match_with_embeds is called per frame, but we want to store per window
-            # We'll use the window frame range as the key, and update it with the latest frame's data
-            if frame_start is not None and frame_end is not None:
-                frame_key = f"frames_{frame_start}_{frame_end}"
-            elif frame_idx is not None:
-                # Try to infer window from frame_idx
-                window_size = self._window_size or 30
-                window_start = (frame_idx // window_size) * window_size
-                window_end = min(window_start + window_size - 1, self._total_frames_per_video.get(video_id, window_start + window_size - 1) - 1)
-                frame_key = f"frames_{window_start}_{window_end}"
-            else:
-                frame_key = "unknown"
-            
-            if video_id not in self._query_tracking_maps:
-                self._query_tracking_maps[video_id] = {}
-            
-            # Check if we already have a mapping for this window
-            # If so, we'll update it (since match_with_embeds is called per frame, we want the last one)
-            is_new_mapping = frame_key not in self._query_tracking_maps[video_id]
-            
-            if is_new_mapping:
-                # Create new entry
-                mapping_entry = {
-                    'sq_id_for_tq': sq_id_for_tq_np.tolist(),  # track_query_idx -> predictor_query_idx
-                    'num_track_queries': len(sq_id_for_tq_np),
-                    'frame_idx': frame_idx,
-                    'frame_start': frame_start,
-                    'frame_end': frame_end
-                }
-                print(
-                    f"[QUERY_MAPPING] Created NEW mapping for video_id={video_id}, "
-                    f"frame_key={frame_key}, frame_start={frame_start}, frame_end={frame_end}, "
-                    f"sq_id_for_tq.shape={sq_id_for_tq.shape if hasattr(sq_id_for_tq, 'shape') else 'N/A'}",
-                    flush=True
-                )
-            else:
-                # Update existing entry (keep any existing last_seq_ids if we don't have new ones yet)
-                existing = self._query_tracking_maps[video_id][frame_key]
-                mapping_entry = existing.copy()
-                mapping_entry['sq_id_for_tq'] = sq_id_for_tq_np.tolist()
-                mapping_entry['num_track_queries'] = len(sq_id_for_tq_np)
-                # Update frame info if we have more specific info
-                if frame_start is not None:
-                    mapping_entry['frame_start'] = frame_start
-                if frame_end is not None:
-                    mapping_entry['frame_end'] = frame_end
-                if frame_idx is not None:
-                    mapping_entry['frame_idx'] = frame_idx
-                # Don't log every update - too verbose (called once per frame)
-            
-            # Also try to capture sequence IDs and activated queries if available
-            # Note: We need to capture this AFTER the sequence IDs are assigned, which happens
-            # after match_with_embeds is called. So we'll capture it in a delayed way.
-            # For now, we'll try to get it, but it might not be available yet.
-            tracker = getattr(self.model, 'tracker', None)
-            if tracker is not None:
-                # Capture last_seq_ids (sequence IDs for activated track queries)
-                # This is set after processing each frame, so we need to capture it at the right time
-                if hasattr(tracker, 'last_seq_ids'):
-                    last_seq_ids = tracker.last_seq_ids
-                    if last_seq_ids is not None and len(last_seq_ids) > 0:
-                        # last_seq_ids is a list where last_seq_ids[k] = seq_id for track query k
-                        # But this is only for activated queries, so indices may not align with sq_id_for_tq
-                        mapping_entry['last_seq_ids'] = (
-                            last_seq_ids if isinstance(last_seq_ids, list) else last_seq_ids.tolist()
-                        )
-                
-                # Capture track_queries to understand which are activated
-                # The track_queries tensor shape tells us how many are active
-                if hasattr(tracker, 'track_queries') and tracker.track_queries is not None:
-                    num_active_track_queries = tracker.track_queries.shape[0]
-                    mapping_entry['num_active_track_queries'] = int(num_active_track_queries)
-            
-            # Store the mapping (we'll update last_seq_ids later if needed)
-            self._query_tracking_maps[video_id][frame_key] = mapping_entry
-            
-            # Also try to update last_seq_ids after a short delay to catch sequence ID assignments
-            # This is a workaround - ideally we'd hook into the sequence ID assignment directly
-            # For now, we'll try to update it when we can
-            self._try_update_last_seq_ids(video_id, frame_key)
-            
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug(f"Could not capture query mapping: {e}")
-    
-    def _try_update_last_seq_ids(self, video_id, frame_key):
-        """Try to update last_seq_ids for a mapping entry after sequence IDs are assigned."""
-        try:
-            if video_id not in self._query_tracking_maps:
-                return
-            if frame_key not in self._query_tracking_maps[video_id]:
-                return
-            
-            tracker = getattr(self.model, 'tracker', None)
-            if tracker is None:
-                return
-            
-            # Try to get last_seq_ids if available
-            if hasattr(tracker, 'last_seq_ids'):
-                last_seq_ids = tracker.last_seq_ids
-                if last_seq_ids is not None and len(last_seq_ids) > 0:
-                    # Update the mapping entry
-                    self._query_tracking_maps[video_id][frame_key]['last_seq_ids'] = (
-                        last_seq_ids if isinstance(last_seq_ids, list) else last_seq_ids.tolist()
-                    )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug(f"Could not update last_seq_ids: {e}")
     
     def _register_hooks(self):
         """Register forward hooks to capture attention maps."""
@@ -1188,49 +851,11 @@ class AttentionExtractor:
         if self.extract_refiner:
             for name, module in self.model.named_modules():
                 if 'transformer_time_self_attention_layers' in name and hasattr(module, 'self_attn'):
-                    hook = RefinerAttentionHook(name, module.self_attn, sink_list=self.refiner_attention_maps)
+                    hook = RefinerAttentionHook(name, module.self_attn, sink_list=self.refiner_attention_maps, extractor=self)
                     module.self_attn.register_forward_hook(hook)
                     self.refiner_hooks.append(hook)
         else:
             print("Skipping refiner attention extraction (disabled)")
-        
-        # Register ViT backbone spatial attention hooks
-        if self.extract_backbone:
-            backbone_layer_indices = []
-            for name, module in self.model.named_modules():
-                # Check if this is a ViT Attention module in the backbone
-                # ViT Attention modules have 'qkv' and 'proj' attributes, and are in the backbone
-                if (hasattr(module, 'qkv') and hasattr(module, 'proj') and 
-                    hasattr(module, 'num_heads') and hasattr(module, 'scale') and
-                    ('backbone' in name or 'vit' in name.lower())):
-                    # Extract layer index from name (e.g., "backbone.vit_module.blocks.5.attn" -> 5)
-                    try:
-                        if 'blocks.' in name:
-                            layer_idx = int(name.split('blocks.')[1].split('.')[0])
-                            # Only register if we want this layer
-                            if self.backbone_layers_to_extract is None or layer_idx in self.backbone_layers_to_extract:
-                                vit_hook = ViTAttentionHook(name, module, sink_list=self.backbone_attention_maps, extractor=self)
-                                vit_hook.register()
-                                self.vit_hooks.append(vit_hook)
-                                backbone_layer_indices.append(layer_idx)
-                                print(f"Registered ViT backbone attention hook for: {name} (layer {layer_idx})")
-                            else:
-                                print(f"Skipping ViT backbone layer {layer_idx} (not in extraction list)")
-                        else:
-                            # If we can't extract layer index, register all
-                            vit_hook = ViTAttentionHook(name, module, sink_list=self.backbone_attention_maps, extractor=self)
-                            vit_hook.register()
-                            self.vit_hooks.append(vit_hook)
-                            print(f"Registered ViT backbone attention hook for: {name}")
-                    except Exception as e:
-                        print(f"Warning: Could not register hook for {name}: {e}")
-            
-            if self.backbone_layers_to_extract is not None:
-                print(f"Extracting attention from {len(backbone_layer_indices)} backbone layers: {sorted(backbone_layer_indices)}")
-            else:
-                print(f"Extracting attention from all {len(backbone_layer_indices)} backbone layers")
-        else:
-            print("Skipping backbone attention extraction (disabled)")
         
         # Register predictor cross-attention hooks
         if hasattr(self.model, 'sem_seg_head') and hasattr(self.model.sem_seg_head, 'predictor'):
@@ -1255,6 +880,95 @@ class AttentionExtractor:
                 print("Warning: Could not find transformer_cross_attention_layers in predictor")
         else:
             print("Skipping predictor cross-attention extraction (predictor not found)")
+        
+        # Register tracker cross-attention hooks only
+        if hasattr(self.model, 'tracker'):
+            tracker = self.model.tracker
+            tracker_layer_indices = []
+            print(f"[ATTENTION_EXTRACTOR] Found tracker: {type(tracker)}")
+            
+            # Register tracker cross-attention hooks only
+            if hasattr(tracker, 'transformer_cross_attention_layers'):
+                num_layers = len(tracker.transformer_cross_attention_layers)
+                print(f"[ATTENTION_EXTRACTOR] Found {num_layers} tracker cross-attention layers")
+                for i, cross_attn_layer in enumerate(tracker.transformer_cross_attention_layers):
+                    if hasattr(cross_attn_layer, 'multihead_attn'):
+                        layer_name = f"tracker.transformer_cross_attention_layers.{i}"
+                        hook = TrackerAttentionHook(
+                            layer_name, i, 'cross', cross_attn_layer.multihead_attn,
+                            sink_list=self.tracker_attention_maps,
+                            extractor=self
+                        )
+                        cross_attn_layer.multihead_attn.register_forward_hook(hook)
+                        
+                        # Add pre-forward hook on layer 0 to track frame index
+                        # Layer 0 is called once per frame, so we can use it to increment frame counter
+                        if i == 0:
+                            def make_frame_tracker(layer_idx):
+                                def frame_tracker_hook(module, input):
+                                    # Get video_id and start_frame_id
+                                    video_id = None
+                                    start_frame_id = None
+                                    if self._current_video_context is not None:
+                                        video_id = self._current_video_context.get('video_id')
+                                    start_frame_id = self._tracker_start_frame_id
+                                    
+                                    # If start_frame_id is None, try to get it from frame_start in video context
+                                    # This is a fallback for when the inference hook hasn't been called yet
+                                    if start_frame_id is None and self._current_video_context is not None:
+                                        frame_start = self._current_video_context.get('frame_start')
+                                        if frame_start is not None:
+                                            # Use frame_start as start_frame_id (this is the window start)
+                                            start_frame_id = frame_start
+                                            print(f"[TRACKER_FRAME_TRACKER] Using frame_start={frame_start} as start_frame_id fallback", flush=True)
+                                    
+                                    if video_id is not None:
+                                        # Use global counter key (across all windows) instead of per-window key
+                                        inference_key = f"{video_id}_global"
+                                        
+                                        # Initialize counter if it doesn't exist (should be initialized in inference hook, but safety check)
+                                        # IMPORTANT: Always start at -1, not start_frame_id - 1, because tracker processes all frames from 0
+                                        if inference_key not in self._tracker_frame_counter:
+                                            self._tracker_frame_counter[inference_key] = -1
+                                            print(f"[TRACKER_FRAME_TRACKER] Initializing global frame counter for {inference_key}, starting at 0 (tracker processes all frames from beginning)", flush=True)
+                                        
+                                        # Increment frame counter (layer 0 is called once per frame)
+                                        self._tracker_frame_counter[inference_key] += 1
+                                        absolute_frame_idx = self._tracker_frame_counter[inference_key]
+                                        
+                                        # Calculate frame index within window for debugging (not used for filename, just for logging)
+                                        frame_idx_in_window = absolute_frame_idx - start_frame_id if start_frame_id is not None else absolute_frame_idx
+                                        
+                                        # Update video context with current frame index
+                                        if self._current_video_context is not None:
+                                            self._current_video_context['frame_idx'] = absolute_frame_idx
+                                        # Also update the tracker frame index (used by attention hooks)
+                                        self._current_tracker_frame_idx = absolute_frame_idx
+                                        
+                                        print(f"[TRACKER_FRAME_TRACKER] Layer 0 pre-forward hook: frame_idx_in_window={frame_idx_in_window}, absolute_frame_idx={absolute_frame_idx}, start_frame_id={start_frame_id}", flush=True)
+                                    else:
+                                        print(f"[TRACKER_FRAME_TRACKER] Warning: Missing video_id or start_frame_id. video_id={video_id}, start_frame_id={start_frame_id}, frame_start={self._current_video_context.get('frame_start') if self._current_video_context else None}", flush=True)
+                                return frame_tracker_hook
+                            
+                            cross_attn_layer.multihead_attn.register_forward_pre_hook(make_frame_tracker(0))
+                            print(f"[ATTENTION_EXTRACTOR] Registered frame tracker pre-forward hook on layer 0", flush=True)
+                        
+                        self.tracker_hooks.append(hook)
+                        tracker_layer_indices.append(i)
+                        print(f"[ATTENTION_EXTRACTOR] Registered tracker cross-attention hook for layer {i}")
+                    else:
+                        print(f"[ATTENTION_EXTRACTOR] Warning: Layer {i} does not have multihead_attn attribute")
+                
+                if len(tracker_layer_indices) > 0:
+                    print(f"[ATTENTION_EXTRACTOR] Successfully registered {len(tracker_layer_indices)} tracker cross-attention hooks: {tracker_layer_indices}")
+                else:
+                    print("[ATTENTION_EXTRACTOR] Warning: Could not find tracker cross-attention layers to hook")
+            else:
+                print("[ATTENTION_EXTRACTOR] Warning: Could not find transformer_cross_attention_layers in tracker")
+                print(f"[ATTENTION_EXTRACTOR] Tracker attributes: {[attr for attr in dir(tracker) if not attr.startswith('_')]}")
+        else:
+            print("[ATTENTION_EXTRACTOR] Skipping tracker attention extraction (tracker not found)")
+            print(f"[ATTENTION_EXTRACTOR] Model attributes: {[attr for attr in dir(self.model) if not attr.startswith('_')]}")
     
     def set_video_context(self, video_id=None, frame_idx=None, frame_start=None, frame_end=None, window_idx=None, forward_pass_id=None):
         """Set video context for hooks to use when saving directly."""
@@ -1291,7 +1005,7 @@ class AttentionExtractor:
                 
                 # Save metadata
                 meta = {
-                    'source': entry.get('source', 'backbone'),
+                    'source': entry.get('source', 'predictor_cross_attn'),
                     'layer': entry.get('layer'),
                     'shape': entry.get('shape'),
                     'spatial_shape': entry.get('spatial_shape'),
@@ -1310,7 +1024,9 @@ class AttentionExtractor:
                     'frame_idx': entry.get('frame_idx'),
                     'frame_start': entry.get('frame_start'),
                     'frame_end': entry.get('frame_end'),
-                    'window_idx': entry.get('window_idx')
+                    'window_idx': entry.get('window_idx'),
+                    'attention_type': entry.get('attention_type'),  # For tracker attention
+                    'tracker_id_to_seq_id': entry.get('tracker_id_to_seq_id')  # Mapping for tracker attention
                 }
                 meta_path = os.path.join(attn_dir, f"{filename}.meta.json")
                 with PathManager.open(meta_path, "w") as mf:
@@ -1330,16 +1046,13 @@ class AttentionExtractor:
         for entry in self.refiner_attention_maps:
             if 'attention_weights' in entry:
                 del entry['attention_weights']
-        for entry in self.backbone_attention_maps:
-            if 'attention_weights' in entry:
-                del entry['attention_weights']
         for entry in self.predictor_attention_maps:
             if 'attention_weights' in entry:
                 del entry['attention_weights']
         
         self.refiner_attention_maps.clear()
-        self.backbone_attention_maps.clear()
         self.predictor_attention_maps.clear()
+        self.tracker_attention_maps.clear()
         
         for hook in self.refiner_hooks:
             for entry in hook.refiner_attention_maps:
@@ -1347,13 +1060,13 @@ class AttentionExtractor:
                     del entry['attention_weights']
             hook.refiner_attention_maps.clear()
         
-        for hook in self.vit_hooks:
+        for hook in self.predictor_hooks:
             for entry in hook.attention_maps:
                 if 'attention_weights' in entry:
                     del entry['attention_weights']
             hook.attention_maps.clear()
         
-        for hook in self.predictor_hooks:
+        for hook in self.tracker_hooks:
             for entry in hook.attention_maps:
                 if 'attention_weights' in entry:
                     del entry['attention_weights']
@@ -1372,12 +1085,11 @@ class AttentionExtractor:
         
         attn_dict = self.get_attention_maps()
         # Check if there's anything to save
-        # Note: when save_immediately_from_hook=True, backbone_spatial and predictor_cross_attn will be empty
-        # because they are saved directly from hooks
+        # Note: when save_immediately_from_hook=True, predictor_cross_attn will be empty
+        # because it is saved directly from hooks
         has_refiner = attn_dict.get('refiner_temporal') and len(attn_dict.get('refiner_temporal', [])) > 0
-        has_backbone = attn_dict.get('backbone_spatial') and len(attn_dict.get('backbone_spatial', [])) > 0
         has_predictor = attn_dict.get('predictor_cross_attn') and len(attn_dict.get('predictor_cross_attn', [])) > 0
-        if not has_refiner and not has_backbone and not has_predictor:
+        if not has_refiner and not has_predictor:
             return
         
         try:
@@ -1419,26 +1131,6 @@ class AttentionExtractor:
             if refiner_count > 0:
                 print(f"[SAVE] Saving {refiner_count} refiner attention maps for video {video_id}, frame {frame_idx}", flush=True)
             
-            # Backbone attention (spatial)
-            for entry in attn_dict.get('backbone_spatial', []):
-                arr = entry.get('attention_weights')
-                key = f"attn_{idx}"
-                if isinstance(arr, torch.Tensor):
-                    arr = arr.cpu().numpy()
-                elif isinstance(arr, np.ndarray):
-                    pass
-                arrays[key] = arr
-                meta.append({
-                    'source': 'backbone',
-                    'key': key,
-                    'layer': entry.get('layer'),
-                    'shape': entry.get('shape'),
-                    'spatial_shape': entry.get('spatial_shape'),
-                    'num_heads': entry.get('num_heads'),
-                    'sequence_length': entry.get('sequence_length'),
-                })
-                idx += 1
-            
             # Predictor cross-attention
             predictor_count = 0
             for entry in attn_dict.get('predictor_cross_attn', []):
@@ -1467,9 +1159,7 @@ class AttentionExtractor:
             
             # Build filename based on what we're saving
             # If saving refiner (temporal) attention only, add "_temporal_refiner_attn" suffix
-            # If saving backbone (spatial) attention only, keep original naming
-            # If saving both, use a combined name (shouldn't happen in practice)
-            if has_refiner and not has_backbone:
+            if has_refiner:
                 # Only refiner (temporal) attention - add "_temporal_refiner_attn" suffix
                 if frame_idx is None:
                     frame_counter = self._save_counter.get(video_id, 0)
@@ -1481,31 +1171,18 @@ class AttentionExtractor:
                     filename = f"video_{video_id}_frames{frame_start}-{frame_end}_temporal_refiner_attn"
                 else:
                     filename = f"video_{video_id}_frame_{frame_idx}_temporal_refiner_attn"
-            elif has_backbone and not has_refiner:
-                # Only backbone (spatial) attention - keep original naming (will be saved per layer from hooks)
-                # This case shouldn't happen here since backbone is saved from hooks
-                if frame_idx is None:
-                    frame_counter = self._save_counter.get(video_id, 0)
-                    self._save_counter[video_id] = frame_counter + 1
-                    filename = f"video_{video_id}_frame_{frame_counter}"
-                elif isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
-                    frame_start = min(frame_idx)
-                    frame_end = max(frame_idx)
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}"
-                else:
-                    filename = f"video_{video_id}_frame_{frame_idx}"
             else:
-                # Both types (shouldn't happen in practice, but handle it)
+                # Predictor cross-attention only
                 if frame_idx is None:
                     frame_counter = self._save_counter.get(video_id, 0)
                     self._save_counter[video_id] = frame_counter + 1
-                    filename = f"video_{video_id}_frame_{frame_counter}_mixed"
+                    filename = f"video_{video_id}_frame_{frame_counter}_predictor_cross_attn"
                 elif isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
                     frame_start = min(frame_idx)
                     frame_end = max(frame_idx)
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_mixed"
+                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_predictor_cross_attn"
                 else:
-                    filename = f"video_{video_id}_frame_{frame_idx}_mixed"
+                    filename = f"video_{video_id}_frame_{frame_idx}_predictor_cross_attn"
             
             # Save immediately
             if arrays:
@@ -1531,16 +1208,28 @@ class AttentionExtractor:
         self.clear_attention_maps()
     
     def get_attention_maps(self):
-        """Get all captured attention maps (refiner, backbone, and predictor)."""
+        """Get all captured attention maps (refiner, predictor, and tracker)."""
         return {
             'refiner_temporal': self.refiner_attention_maps,
-            'backbone_spatial': self.backbone_attention_maps,
-            'predictor_cross_attn': self.predictor_attention_maps
+            'predictor_cross_attn': self.predictor_attention_maps,
+            'tracker': self.tracker_attention_maps
         }
     
-    def save_query_tracking_maps(self):
-        """Save query tracking maps to disk."""
-        if not self._output_dir or not self._query_tracking_maps:
+    def save_refiner_id_mappings(self, video_id=None, incremental=False):
+        """Save refiner_id → sequence_id mappings to disk.
+        
+        Args:
+            video_id: If provided, only save maps for this specific video (incremental mode)
+            incremental: If True, append to existing file instead of overwriting
+        
+        Saves:
+            refiner_id_to_seq_id_maps: refiner_id (index) → sequence_id mappings per window
+        """
+        if not self._output_dir:
+            return
+        
+        # Only save if we have refiner_id mappings
+        if not self._refiner_id_to_seq_id_maps:
             return
         
         try:
@@ -1551,173 +1240,54 @@ class AttentionExtractor:
             attn_dir = os.path.join(self._output_dir, "attention_maps")
             os.makedirs(attn_dir, exist_ok=True)
             
-            tracking_path = os.path.join(attn_dir, "query_tracking_maps.json")
+            tracking_path = os.path.join(attn_dir, "refiner_id_mappings.json")
             
-            # Convert numpy arrays to lists for JSON serialization
-            tracking_dict = {}
-            for video_id, frames in self._query_tracking_maps.items():
-                tracking_dict[str(video_id)] = {}
-                for frame_key, mapping in frames.items():
-                    tracking_dict[str(video_id)][frame_key] = mapping
+            # Load existing data if incremental mode
+            existing_dict = {}
+            if incremental and os.path.exists(tracking_path):
+                try:
+                    with PathManager.open(tracking_path, "r") as f:
+                        existing_dict = json.load(f)
+                except Exception:
+                    pass  # If we can't read existing file, start fresh
+            
+            tracking_dict = existing_dict.copy() if incremental else {}
+            
+            # Save refiner_id → sequence_id mappings
+            # Structure: {"refiner_id_to_seq_id_maps": {video_id: {window_key: [seq_id_0, seq_id_1, ...]}}}
+            videos_to_save_refiner = []
+            if self._refiner_id_to_seq_id_maps:
+                if '_refiner_id_to_seq_id_maps' not in tracking_dict:
+                    tracking_dict['_refiner_id_to_seq_id_maps'] = {}
+                
+                videos_to_save_refiner = [video_id] if video_id is not None else list(self._refiner_id_to_seq_id_maps.keys())
+                for vid in videos_to_save_refiner:
+                    if vid not in self._refiner_id_to_seq_id_maps:
+                        continue
+                    window_maps = self._refiner_id_to_seq_id_maps[vid]
+                    if str(vid) not in tracking_dict['_refiner_id_to_seq_id_maps']:
+                        tracking_dict['_refiner_id_to_seq_id_maps'][str(vid)] = {}
+                    for window_key, seq_id_list in window_maps.items():
+                        tracking_dict['_refiner_id_to_seq_id_maps'][str(vid)][window_key] = seq_id_list
             
             with PathManager.open(tracking_path, "w") as f:
                 f.write(json.dumps(tracking_dict, indent=2))
                 f.flush()
             
-            print(f"[SAVE] Saved query tracking maps for {len(self._query_tracking_maps)} videos to {tracking_path}", flush=True)
+            num_refiner_maps = len(videos_to_save_refiner) if videos_to_save_refiner else (len(self._refiner_id_to_seq_id_maps) if self._refiner_id_to_seq_id_maps else 0)
+            print(
+                f"[SAVE] Saved refiner_id mappings for {num_refiner_maps} video(s) to {tracking_path}",
+                flush=True
+            )
+            
+            # If saving incrementally for a specific video, clear that video's data from memory
+            if incremental and video_id is not None:
+                if video_id in self._refiner_id_to_seq_id_maps:
+                    del self._refiner_id_to_seq_id_maps[video_id]
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"Failed to save query tracking maps: {e}")
+            logging.getLogger(__name__).warning(f"Failed to save refiner_id mappings: {e}")
     
-    def get_predictor_query_for_refiner_id(self, video_id, refiner_id, frame_idx=None):
-        """Get predictor query index for a given refiner_id (index in refiner output).
-        
-        Args:
-            video_id: Video ID
-            refiner_id: Refiner ID (index in refiner output, NOT sequence ID)
-            frame_idx: Frame index (optional, uses last frame if not provided)
-        
-        Returns:
-            predictor_query_idx: Predictor query index, or None if not found
-        """
-        # First, convert refiner_id (index) to sequence_id
-        sequence_id = self._get_sequence_id_from_refiner_id(video_id, refiner_id)
-        if sequence_id is None:
-            return None
-        
-        # Now use sequence_id to find predictor query (same as before)
-        if video_id not in self._query_tracking_maps:
-            return None
-        
-        frames = self._query_tracking_maps[video_id]
-        
-        # Find the frame mapping
-        if frame_idx is not None:
-            # Try exact frame first
-            frame_key = f"frame_{frame_idx}"
-            if frame_key not in frames:
-                # Try frame range
-                frame_key = f"frames_{frame_idx}_{frame_idx}"
-        else:
-            # Use the last frame available
-            frame_keys = sorted([k for k in frames.keys() if k.startswith("frame")])
-            if not frame_keys:
-                return None
-            frame_key = frame_keys[-1]
-        
-        if frame_key not in frames:
-            return None
-        
-        mapping = frames[frame_key]
-        last_seq_ids = mapping.get('last_seq_ids')
-        sq_id_for_tq = mapping.get('sq_id_for_tq')
-        seq_id_to_query = mapping.get('seq_id_to_query_mapping')
-        
-        # Try seq_id_to_query_mapping first (most reliable)
-        if seq_id_to_query is not None and sequence_id in seq_id_to_query:
-            query_info = seq_id_to_query[sequence_id]
-            return query_info['predictor_query_id']
-        
-        # Fallback: try last_seq_ids
-        if last_seq_ids is None or sq_id_for_tq is None:
-            return None
-        
-        # Find track query index for this sequence ID
-        # Note: last_seq_ids[k] = seq_id for track query k (only for activated queries)
-        # sq_id_for_tq[k] = predictor query index for track query k
-        try:
-            # Find which track query index has this sequence ID
-            track_query_idx = last_seq_ids.index(sequence_id)
-            # Get predictor query index from the mapping
-            if track_query_idx < len(sq_id_for_tq):
-                predictor_query_idx = sq_id_for_tq[track_query_idx]
-                return int(predictor_query_idx)
-        except (ValueError, IndexError):
-            pass
-        
-        return None
-    
-    def get_all_predictor_queries_for_refiner_id(self, video_id, refiner_id):
-        """Get all predictor query indices for a given refiner_id across all windows.
-        
-        Args:
-            video_id: Video ID
-            refiner_id: Refiner ID (index in refiner output, NOT sequence ID)
-        
-        Returns:
-            List of dicts with keys: 'predictor_query_id', 'frame_start', 'frame_end', 'frame_key'
-            Returns empty list if not found
-        """
-        # First, convert refiner_id (index) to sequence_id
-        sequence_id = self._get_sequence_id_from_refiner_id(video_id, refiner_id)
-        if sequence_id is None:
-            return []
-        
-        # Now use sequence_id to find predictor queries (same as before)
-        if video_id not in self._query_tracking_maps:
-            return []
-        
-        frames = self._query_tracking_maps[video_id]
-        results = []
-        
-        # Check all windows/frames
-        for frame_key, mapping in frames.items():
-            last_seq_ids = mapping.get('last_seq_ids')
-            sq_id_for_tq = mapping.get('sq_id_for_tq')
-            seq_id_to_query = mapping.get('seq_id_to_query_mapping')
-            
-            # Skip if we don't have sq_id_for_tq (this means match_with_embeds wasn't called for this window)
-            # This can happen for the first window if match_with_embeds wasn't called for any frame
-            # But it should be called for frames 1-99, so this shouldn't happen unless there's a bug
-            if sq_id_for_tq is None:
-                # Debug: log why we're skipping this window
-                print(
-                    f"[QUERY_LOOKUP] Skipping window {frame_key} for video {video_id}, refiner_id {refiner_id}: "
-                    f"sq_id_for_tq is None. last_seq_ids={last_seq_ids is not None}, "
-                    f"seq_id_to_query={seq_id_to_query is not None}",
-                    flush=True
-                )
-                continue
-            
-            # Try to find sequence_id using the seq_id_to_query_mapping first (most reliable)
-            found = False
-            predictor_query_id = None
-            
-            if seq_id_to_query is not None and sequence_id in seq_id_to_query:
-                query_info = seq_id_to_query[sequence_id]
-                predictor_query_id = query_info['predictor_query_id']
-                found = True
-            elif last_seq_ids is not None:
-                # Fallback: try last_seq_ids (active track queries for last frame)
-                try:
-                    track_query_idx = last_seq_ids.index(sequence_id)
-                    if track_query_idx < len(sq_id_for_tq):
-                        predictor_query_id = int(sq_id_for_tq[track_query_idx])
-                        found = True
-                except (ValueError, IndexError):
-                    pass
-            
-            # If not found, skip this window
-            if not found:
-                continue
-            
-            # Get frame information
-            frame_start = mapping.get('frame_start')
-            frame_end = mapping.get('frame_end')
-            frame_idx = mapping.get('frame_idx')
-            
-            results.append({
-                'predictor_query_id': predictor_query_id,
-                'frame_start': frame_start,
-                'frame_end': frame_end,
-                'frame_idx': frame_idx,
-                'frame_key': frame_key
-            })
-        
-        # Sort by frame_start (or frame_idx if frame_start is None)
-        results.sort(key=lambda x: x.get('frame_start') if x.get('frame_start') is not None else (x.get('frame_idx') if x.get('frame_idx') is not None else 0))
-        
-        return results
     
     def _get_sequence_id_from_refiner_id(self, video_id, refiner_id):
         """Convert refiner_id (index) to sequence_id.
@@ -1728,15 +1298,34 @@ class AttentionExtractor:
         
         Returns:
             sequence_id: The sequence ID corresponding to this refiner_id, or None
+        
+        IMPORTANT: The seq_id_list from common_inference represents the FINAL order
+        after all windows are processed. We should use the most recent/last window's
+        seq_id_list, as it should contain the final ordering.
         """
         if video_id not in self._refiner_id_to_seq_id_maps:
             return None
         
         video_maps = self._refiner_id_to_seq_id_maps[video_id]
         
-        # Try to find the sequence_id in any window
-        # The seq_id_list order should be consistent across windows (from video_ins_hub iteration)
-        # But we'll check all windows and use the first one that has enough entries
+        if not video_maps:
+            return None
+        
+        # The seq_id_list from common_inference is built from video_ins_hub which
+        # accumulates across all windows. The final seq_id_list (from the last window)
+        # should represent the final ordering used in results.json.
+        # We'll use the last window's seq_id_list (most recent) as it should be the final one.
+        window_keys = sorted(video_maps.keys())
+        if not window_keys:
+            return None
+        
+        # Try the last window first (should be the final ordering)
+        for window_key in reversed(window_keys):
+            seq_id_list = video_maps[window_key]
+            if isinstance(seq_id_list, list) and refiner_id < len(seq_id_list):
+                return int(seq_id_list[refiner_id])
+        
+        # Fallback: try any window (shouldn't be needed, but for safety)
         for window_key, seq_id_list in video_maps.items():
             if isinstance(seq_id_list, list) and refiner_id < len(seq_id_list):
                 return int(seq_id_list[refiner_id])
@@ -1755,29 +1344,18 @@ class AttentionExtractor:
         if hasattr(self, '_predictor_forward_hook') and self._predictor_forward_hook is not None:
             self._predictor_forward_hook.remove()
             self._predictor_forward_hook = None
-        # Restore tracker methods if hooked
-        if hasattr(self, '_tracker_match_hook') and self._tracker_match_hook is not None:
-            tracker, original_method = self._tracker_match_hook
-            tracker.match_with_embeds = original_method
-            self._tracker_match_hook = None
-        if hasattr(self, '_tracker_forward_hook') and self._tracker_forward_hook is not None:
-            tracker, original_method = self._tracker_forward_hook
-            tracker.forward_offline_mode = original_method
-            self._tracker_forward_hook = None
-        if hasattr(self, '_tracker_inference_hook') and self._tracker_inference_hook is not None:
-            tracker, original_method = self._tracker_inference_hook
-            tracker.inference = original_method
-            self._tracker_inference_hook = None
         if hasattr(self, '_common_inference_hook') and self._common_inference_hook is not None:
             model, original_method = self._common_inference_hook
             model.common_inference = original_method
             self._common_inference_hook = None
+        if hasattr(self, '_tracker_inference_hook') and self._tracker_inference_hook is not None:
+            tracker, original_method = self._tracker_inference_hook
+            tracker.inference = original_method
+            self._tracker_inference_hook = None
         if hasattr(self, '_run_window_hook') and self._run_window_hook is not None:
             model, original_method = self._run_window_hook
             model.run_window_inference = original_method
             self._run_window_hook = None
-        for hook in self.vit_hooks:
-            hook.unregister()
         self.refiner_hooks.clear()
-        self.vit_hooks.clear()
         self.predictor_hooks.clear()
+        self.tracker_hooks.clear()
