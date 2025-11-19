@@ -81,34 +81,6 @@ def _instances_to_coco_json_video_with_refiner(inputs, outputs, attention_extrac
                 refiner_id = int(refiner_ids[instance_id])
                 res["refiner_id"] = refiner_id
                 
-                # Try to get predictor query ID(s) if extractor is available
-                if attention_extractor is not None:
-                    # Get all predictor_query_ids across all windows for this instance
-                    # refiner_id is the index in the refiner output, we need to convert it to sequence_id first
-                    all_query_mappings = attention_extractor.get_all_predictor_queries_for_refiner_id(
-                        video_id=video_id,
-                        refiner_id=refiner_id
-                    )
-                    
-                    if all_query_mappings:
-                        # Store list of predictor_query_ids with their frame information
-                        res["predictor_query_ids"] = [
-                            {
-                                "predictor_query_id": q["predictor_query_id"],
-                                "frame_start": q["frame_start"],
-                                "frame_end": q["frame_end"]
-                            }
-                            for q in all_query_mappings
-                        ]
-                    else:
-                        # Debug: log when we can't find the mapping
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.debug(
-                            f"Could not find predictor_query_id for video_id={video_id}, "
-                            f"refiner_id={refiner_id}, frame_idx={frame_idx}. "
-                            f"Available windows: {list(attention_extractor._query_tracking_maps.get(video_id, {}).keys())}"
-                        )
             except Exception:
                 pass
         res["segmentations"] = segms
@@ -427,6 +399,22 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
                     # Fallback: just clear if save method doesn't exist
                     if hasattr(self._attention_extractor, 'clear_attention_maps'):
                         self._attention_extractor.clear_attention_maps()
+                
+                # Save refiner_id mappings incrementally after each video completes
+                # This prevents memory accumulation of tracking data
+                if hasattr(self._attention_extractor, 'save_immediately_from_hook') and \
+                   self._attention_extractor.save_immediately_from_hook and \
+                   hasattr(self._attention_extractor, 'save_refiner_id_mappings') and \
+                   video_id is not None:
+                    # Save refiner_id mappings for this video incrementally
+                    # This will append to the existing file and clear the video's data from memory
+                    try:
+                        self._attention_extractor.save_refiner_id_mappings(
+                            video_id=video_id,
+                            incremental=True
+                        )
+                    except Exception as e:
+                        logging.getLogger(__name__).debug(f"Failed to save refiner_id mappings incrementally: {e}")
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed capturing attention maps: {e}")
 
@@ -538,13 +526,13 @@ class TemporalYTVISEvaluator(YTVISEvaluator):
                     f"Failed to write image_dimensions.json: {e}"
                 )
             
-            # Save query tracking maps (refiner_id → predictor_query_idx mapping)
+            # Save refiner_id mappings (refiner_id → sequence_id mapping)
             try:
-                if self._attention_extractor is not None and hasattr(self._attention_extractor, 'save_query_tracking_maps'):
-                    self._attention_extractor.save_query_tracking_maps()
+                if self._attention_extractor is not None and hasattr(self._attention_extractor, 'save_refiner_id_mappings'):
+                    self._attention_extractor.save_refiner_id_mappings()
             except Exception as e:
                 logging.getLogger(__name__).warning(
-                    f"Failed to save query tracking maps: {e}"
+                    f"Failed to save refiner_id mappings: {e}"
                 )
 
         # Return the same metrics dict as base
