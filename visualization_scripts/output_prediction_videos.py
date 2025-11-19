@@ -226,9 +226,9 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
         print("\nAll videos with predictions were successfully processed and saved.")
 
 if __name__ == "__main__":
-    results_json = "/store/simone/dvis-model-outputs/trained_models/model_stride1/checkpoint_evaluations/checkpoint_0002342/inference/results.json"
-    valid_json = "/store/simone/dvis-model-outputs/trained_models/model_stride1/val.json"
+    results_json = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_fold3/eval_5251_all_frames/inference/results.json"
+    valid_json = "/home/simone/shared-data/fishway_ytvis/val_fold3_all_frames.json"
     image_root = "/data/fishway_ytvis/all_videos"
-    output_dir = "/store/simone/dvis-model-outputs/trained_models/model_stride1/checkpoint_evaluations/checkpoint_0002342/inference/video_predictions"
+    output_dir = "/home/simone/store/simone/dvis-model-outputs/trained_models/model_camera_fold3/eval_5251_all_frames/inference/video_predictions"
 
-    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0.05)
+    visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0)
