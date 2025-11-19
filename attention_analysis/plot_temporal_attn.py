@@ -139,6 +139,39 @@ def load_rollout_for_video(run_dir, video_id, refiner_id):
     return data['rollout']
 
 
+def load_col_avg_norm_for_video(run_dir, video_id, refiner_id):
+    """Load normalized column averages for a video (pre-computed by temporal_rollout.py)."""
+    attn_dir = os.path.join(run_dir, "attention_maps")
+    rolled_out_dir = os.path.join(attn_dir, "rolled_out")
+    col_avg_norm_path = os.path.join(rolled_out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_col_avg_norm.npz")
+    if not os.path.exists(col_avg_norm_path):
+        raise FileNotFoundError(f"Column averages file not found: {col_avg_norm_path}")
+    data = np.load(col_avg_norm_path)
+    return data['col_avg_norm']
+
+
+def load_rollout_nolayer0_for_video(run_dir, video_id, refiner_id):
+    """Load rollout matrix without layer 0 for a video."""
+    attn_dir = os.path.join(run_dir, "attention_maps")
+    rolled_out_dir = os.path.join(attn_dir, "rolled_out")
+    rollout_path = os.path.join(rolled_out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_nolayer0.npz")
+    if not os.path.exists(rollout_path):
+        raise FileNotFoundError(f"Rollout (no layer 0) file not found: {rollout_path}")
+    data = np.load(rollout_path)
+    return data['rollout']
+
+
+def load_col_avg_norm_nolayer0_for_video(run_dir, video_id, refiner_id):
+    """Load normalized column averages without layer 0 for a video (pre-computed by temporal_rollout.py)."""
+    attn_dir = os.path.join(run_dir, "attention_maps")
+    rolled_out_dir = os.path.join(attn_dir, "rolled_out")
+    col_avg_norm_path = os.path.join(rolled_out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_nolayer0_col_avg_norm.npz")
+    if not os.path.exists(col_avg_norm_path):
+        raise FileNotFoundError(f"Column averages (no layer 0) file not found: {col_avg_norm_path}")
+    data = np.load(col_avg_norm_path)
+    return data['col_avg_norm']
+
+
 def plot_rollout_for_video(run_dir, video_id, refiner_id, out_dir):
     """Plot the rollout matrix for a video."""
     try:
@@ -170,26 +203,23 @@ def plot_rollout_for_video(run_dir, video_id, refiner_id, out_dir):
     
     print(f"Saved row-normalized rollout plot to {out_path}")
     
-    # Compute column averages from the non-normalized rollout matrix
-    col_avg = rollout.mean(axis=0)  # Average each column -> shape [num_frames]
-    
-    # Min-max normalize the column averages to [0, 1]
-    col_min = col_avg.min()
-    col_max = col_avg.max()
-    col_range = col_max - col_min
-    if col_range == 0:
-        col_avg_norm = np.zeros_like(col_avg)  # All zeros if constant
-    else:
-        col_avg_norm = (col_avg - col_min) / col_range
+    # Load pre-computed normalized column averages (from temporal_rollout.py)
+    try:
+        col_avg_norm = load_col_avg_norm_for_video(run_dir, video_id, refiner_id)
+    except FileNotFoundError:
+        print(f"Warning: Normalized column averages not found for video {video_id}, refiner {refiner_id}")
+        print(f"  Skipping column averages plot. Run temporal_rollout.py first.")
+        return
     
     # Plot column averages as a line plot
+    num_frames = len(col_avg_norm)
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-    ax.plot(range(T), col_avg_norm, linewidth=2)
+    ax.plot(range(num_frames), col_avg_norm, linewidth=2)
     ax.set_xlabel('Frame Index', fontsize=11)
     ax.set_ylabel('Normalized Column Average', fontsize=11)
     ax.set_title(f'Rollout Column Averages (Normalized)\nVideo {video_id}, Refiner ID {refiner_id}', fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, T - 1)
+    ax.set_xlim(0, num_frames - 1)
     ax.set_ylim(0, 1)
     plt.tight_layout()
     
@@ -198,6 +228,60 @@ def plot_rollout_for_video(run_dir, video_id, refiner_id, out_dir):
     plt.close()
     
     print(f"Saved column averages plot to {out_path_colavg}")
+    
+    # Plot rollout without layer 0 (if available)
+    try:
+        rollout_nolayer0 = load_rollout_nolayer0_for_video(run_dir, video_id, refiner_id)
+    except FileNotFoundError:
+        print(f"Rollout (no layer 0) not found for video {video_id}, refiner {refiner_id}, skipping")
+        return
+    
+    T_nolayer0, _ = rollout_nolayer0.shape
+    
+    # Row-normalize the rollout matrix before plotting
+    rollout_nolayer0_normalized = normalize_rows(rollout_nolayer0)
+    
+    # Plot row-normalized rollout result (no layer 0)
+    fig, ax = plt.subplots(1, 1, figsize=(6, 5))
+    im = ax.imshow(rollout_nolayer0_normalized, cmap='viridis', aspect='equal')
+    ax.set_title(f'Rollout (T_6 * ... * T_1) Row-Normalized\nVideo {video_id}, Refiner ID {refiner_id}', fontsize=10)
+    ax.set_xlabel('Frame')
+    ax.set_ylabel('Frame')
+    ax.set_box_aspect(1)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    
+    out_path_nolayer0 = os.path.join(out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_nolayer0.png")
+    plt.savefig(out_path_nolayer0, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved row-normalized rollout plot (no layer 0) to {out_path_nolayer0}")
+    
+    # Load pre-computed normalized column averages without layer 0
+    try:
+        col_avg_norm_nolayer0 = load_col_avg_norm_nolayer0_for_video(run_dir, video_id, refiner_id)
+    except FileNotFoundError:
+        print(f"Warning: Normalized column averages (no layer 0) not found for video {video_id}, refiner {refiner_id}")
+        print(f"  Skipping column averages plot (no layer 0). Run temporal_rollout.py first.")
+        return
+    
+    # Plot column averages as a line plot (no layer 0)
+    num_frames_nolayer0 = len(col_avg_norm_nolayer0)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+    ax.plot(range(num_frames_nolayer0), col_avg_norm_nolayer0, linewidth=2)
+    ax.set_xlabel('Frame Index', fontsize=11)
+    ax.set_ylabel('Normalized Column Average', fontsize=11)
+    ax.set_title(f'Rollout Column Averages (Normalized, No Layer 0)\nVideo {video_id}, Refiner ID {refiner_id}', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, num_frames_nolayer0 - 1)
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    
+    out_path_colavg_nolayer0 = os.path.join(out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_nolayer0_colavg.png")
+    plt.savefig(out_path_colavg_nolayer0, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved column averages plot (no layer 0) to {out_path_colavg_nolayer0}")
 
 
 def plot_attention_grid_for_video(run_dir, video_id, refiner_id, out_dir):
@@ -267,11 +351,11 @@ def plot_attention_grid_for_video(run_dir, video_id, refiner_id, out_dir):
 def main():
     parser = argparse.ArgumentParser(description="Plot temporal attention heatmaps per video")
     parser.add_argument("run_dir", help="Evaluation run directory (contains inference/results_temporal.json)")
-    parser.add_argument("--out", dest="out_dir", default=None, help="Output directory for plots (default: <run_dir>/inference/attention_plots)")
+    parser.add_argument("--out", dest="out_dir", default=None, help="Output directory for plots (default: <run_dir>/inference/temporal_attention_plots)")
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    out_dir = args.out_dir or os.path.join(run_dir, "inference", "attention_plots")
+    out_dir = args.out_dir or os.path.join(run_dir, "inference", "temporal_attention_plots")
 
     predictions = load_results_temporal(run_dir)
     top_by_video = pick_top_predictions_by_video(predictions)
