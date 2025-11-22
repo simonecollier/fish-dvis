@@ -32,15 +32,76 @@ def pick_top_predictions_by_video(predictions):
 def load_attention_for_video(run_dir, video_id):
     """Load attention maps npz and metadata for a video.
     
-    Looks for files matching pattern: video_{video_id}_*temporal_refiner_attn.npz
-    in the attention_maps directory (not inference/attention_maps).
+    Supports multiple naming conventions:
+    1. New: video_{video_id}_frames*-*_refiner_temporal_layer_*_attn.npz (multiple files per video)
+    2. Old: video_{video_id}_*temporal_refiner_attn.npz (single consolidated file)
+    3. Fallback: video_{video_id}.npz
+    
+    Only loads refiner attention maps (ignores predictor maps).
     """
     # Try both locations: attention_maps/ and inference/attention_maps/
     attn_dir1 = os.path.join(run_dir, "attention_maps")
     attn_dir2 = os.path.join(run_dir, "inference", "attention_maps")
     
-    # Search for files matching the pattern
-    npz_patterns = [
+    # First, try to find new format: multiple refiner temporal files per video
+    # Pattern: video_{video_id}_*refiner_temporal*.npz (but NOT predictor)
+    new_patterns = [
+        os.path.join(attn_dir1, f"video_{video_id}_*refiner_temporal*.npz"),
+        os.path.join(attn_dir2, f"video_{video_id}_*refiner_temporal*.npz"),
+    ]
+    
+    npz_files = []
+    for pattern in new_patterns:
+        matches = glob.glob(pattern)
+        # Filter out predictor files if any match
+        matches = [m for m in matches if 'predictor' not in m.lower()]
+        npz_files.extend(matches)
+    
+    if npz_files:
+        # Load all refiner temporal files and combine them
+        arrays = {}
+        meta = []
+        
+        for npz_path in sorted(npz_files):
+            # Load the npz file
+            file_arrays = np.load(npz_path)
+            
+            # Find corresponding meta.json file
+            meta_path = npz_path.replace(".npz", ".meta.json")
+            if not os.path.exists(meta_path):
+                print(f"Warning: Could not find metadata file for {npz_path}, skipping")
+                continue
+            
+            with open(meta_path, "r") as f:
+                file_meta = json.load(f)
+            
+            # Extract layer name from metadata
+            layer = file_meta.get("layer")
+            if not layer:
+                # Try to infer from filename
+                import re
+                match = re.search(r'layer_(\d+)_attn', os.path.basename(npz_path))
+                if match:
+                    layer_idx = match.group(1)
+                    layer = f"refiner.transformer_time_self_attention_layers.{layer_idx}"
+                else:
+                    layer = os.path.basename(npz_path).replace(".npz", "")
+            
+            # Use layer name as key, or generate a unique key
+            # If multiple files have the same layer (different frame ranges), we'll use the last one
+            key = layer
+            arrays[key] = file_arrays['attention_weights'] if 'attention_weights' in file_arrays else list(file_arrays.values())[0]
+            
+            # Add metadata entry
+            meta_entry = file_meta.copy()
+            meta_entry['key'] = key
+            meta.append(meta_entry)
+        
+        if arrays:
+            return arrays, meta
+    
+    # Fallback to old format: single consolidated file
+    old_patterns = [
         os.path.join(attn_dir1, f"video_{video_id}_*temporal_refiner_attn.npz"),
         os.path.join(attn_dir2, f"video_{video_id}_*temporal_refiner_attn.npz"),
         os.path.join(attn_dir1, f"video_{video_id}.npz"),  # Fallback to simple pattern
@@ -48,8 +109,10 @@ def load_attention_for_video(run_dir, video_id):
     ]
     
     npz_path = None
-    for pattern in npz_patterns:
+    for pattern in old_patterns:
         matches = glob.glob(pattern)
+        # Filter out predictor files if any match
+        matches = [m for m in matches if 'predictor' not in m.lower()]
         if matches:
             npz_path = matches[0]  # Use first match
             break
