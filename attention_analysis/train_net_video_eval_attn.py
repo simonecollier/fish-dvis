@@ -205,36 +205,36 @@ def setup(args):
     if datatype == 'camera':
         print("Registering camera datasets...")
         register_ytvis_instances(
-            "ytvis_fishway_val_camera_fold6",
+            "ytvis_fishway_val_camera_fold4",
             {},
             #"/data/fishway_ytvis/val_vid_66.json",
-            "/data/fishway_ytvis/val_fold6.json",
+            "/home/simone/store/simone/dvis-model-outputs/top_fold_results/camera/fold4/checkpoint_0006059/val_fold4_all_frames.json",
             "/data/fishway_ytvis/all_videos"
         )
     elif datatype == 'silhouette':
         print("Registering silhouette datasets...")
         register_ytvis_instances(
-            "ytvis_fishway_val_silhouette_fold6",
+            "ytvis_fishway_val_silhouette_fold2",
             {},
             #"/data/fishway_ytvis/val_vid_66.json",
-            "/data/fishway_ytvis/val_fold6.json",
+            "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/fold2/checkpoint_0005655/val_fold2_all_frames.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
     else:
         print("Warning: Could not determine datatype from config file. Registering all datasets.")
         # Fallback: register all datasets if datatype cannot be determined
         register_ytvis_instances(
-            "ytvis_fishway_val_camera_fold6",
+            "ytvis_fishway_val_camera_fold4",
             {},
             #"/data/fishway_ytvis/val_vid_66.json",
-            "/data/fishway_ytvis/val_fold6.json",
+            "/home/simone/store/simone/dvis-model-outputs/top_fold_results/camera/fold4/checkpoint_0006059/val_fold4_all_frames.json",
             "/data/fishway_ytvis/all_videos"
         )
         register_ytvis_instances(
-            "ytvis_fishway_val_silhouette_fold6",
+            "ytvis_fishway_val_silhouette_fold2",
             {},
             #"/data/fishway_ytvis/val_vid_66.json",
-            "/data/fishway_ytvis/val_fold6.json",
+            "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/fold2/checkpoint_0005655/val_fold2_all_frames.json",
             "/data/fishway_ytvis/all_videos_mask"
         )
 
