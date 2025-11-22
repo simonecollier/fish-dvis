@@ -21,10 +21,83 @@ matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
 
+def find_val_json(base_dir: str) -> Optional[str]:
+    """
+    Find the val JSON file in the base directory by looking for files with 'val' in the name.
+    
+    Args:
+        base_dir: Base directory to search
+        
+    Returns:
+        Path to the val JSON file, or None if not found
+    """
+    base_path = Path(base_dir)
+    
+    # Look for JSON files with 'val' in the name
+    json_files = list(base_path.glob("*.json"))
+    
+    for json_file in json_files:
+        if 'val' in json_file.name.lower():
+            return str(json_file)
+    
+    return None
+
+
 def load_results_temporal(results_path: str) -> List[Dict]:
     """Load results_temporal.json file."""
     with open(results_path, 'r') as f:
         return json.load(f)
+
+
+def analyze_frames_with_annotations(val_json_path: str) -> Dict[int, Dict]:
+    """
+    Analyze which frames have non-null annotations for each video.
+    
+    Args:
+        val_json_path: Path to the val JSON file
+        
+    Returns:
+        Dictionary mapping video_id -> {
+            'num_frames_with_fish': int,
+            'frame_indices': List[int],
+            'file_names': List[str]
+        }
+    """
+    with open(val_json_path, 'r') as f:
+        val_data = json.load(f)
+    
+    videos = {video['id']: video for video in val_data['videos']}
+    annotations = {ann['video_id']: ann for ann in val_data['annotations']}
+    
+    result = {}
+    
+    for video_id, video in videos.items():
+        if video_id not in annotations:
+            continue
+        
+        annotation = annotations[video_id]
+        file_names = video.get('file_names', [])
+        
+        # Check segmentations for non-null values (most reliable indicator)
+        segmentations = annotation.get('segmentations', [])
+        
+        # Find frames with non-null annotations
+        frame_indices = []
+        frame_file_names = []
+        
+        for frame_idx, seg in enumerate(segmentations):
+            if seg is not None:
+                frame_indices.append(frame_idx)
+                if frame_idx < len(file_names):
+                    frame_file_names.append(file_names[frame_idx])
+        
+        result[video_id] = {
+            'num_frames_with_fish': len(frame_indices),
+            'frame_indices': frame_indices,
+            'file_names': frame_file_names
+        }
+    
+    return result
 
 
 def find_top_predictions_per_video(results: List[Dict]) -> Dict[int, Dict]:
@@ -103,7 +176,8 @@ def extract_activation_vector(activation_weights: np.ndarray, refiner_id: int) -
 
 
 def plot_activation_vector(activation_vector: np.ndarray, video_id: int, refiner_id: int, 
-                          score: float, category_id: Optional[int], output_path: str):
+                          score: float, category_id: Optional[int], output_path: str,
+                          frames_with_fish: Optional[List[int]] = None):
     """
     Plot activation vector as a line plot with frame number on x-axis.
     
@@ -114,24 +188,32 @@ def plot_activation_vector(activation_vector: np.ndarray, video_id: int, refiner
         score: Prediction score
         category_id: Category ID (optional)
         output_path: Path to save the plot
+        frames_with_fish: List of frame indices that contain fish annotations (optional)
     """
     num_frames = len(activation_vector)
     frame_numbers = np.arange(num_frames)
     
-    plt.figure(figsize=(12, 6))
-    plt.plot(frame_numbers, activation_vector, linewidth=2, color='steelblue')
-    plt.xlabel('Frame Number', fontsize=12)
-    plt.ylabel('Activation Weight (Frame Importance, Normalized [0,1])', fontsize=12)
-    plt.ylim(0, 1)  # Ensure y-axis shows [0, 1] range
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Add pale red background for frames with fish
+    if frames_with_fish is not None:
+        for frame_idx in frames_with_fish:
+            if 0 <= frame_idx < num_frames:
+                ax.axvspan(frame_idx - 0.5, frame_idx + 0.5, color='red', alpha=0.15, zorder=0)
+    
+    ax.plot(frame_numbers, activation_vector, linewidth=2, color='steelblue', zorder=2)
+    ax.set_xlabel('Frame Number', fontsize=12)
+    ax.set_ylabel('Activation Weight (Frame Importance, Normalized [0,1])', fontsize=12)
+    ax.set_ylim(0, 1)  # Ensure y-axis shows [0, 1] range
     
     # Create title with video info
     title = f'Video {video_id} - Activation Proj Weights (Normalized)'
     title += f'\nRefiner ID: {refiner_id}, Score: {score:.6f}'
     if category_id is not None:
         title += f', Category: {category_id}'
-    plt.title(title, fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=14, fontweight='bold')
     
-    plt.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
     
     # Save plot
@@ -139,6 +221,67 @@ def plot_activation_vector(activation_vector: np.ndarray, video_id: int, refiner
     plt.close()
     
     print(f"  Saved plot to {output_path}")
+
+
+def plot_activation_vector_sorted_bar(activation_vector: np.ndarray, video_id: int, refiner_id: int, 
+                                     score: float, category_id: Optional[int], output_path: str,
+                                     frames_with_fish: Optional[List[int]] = None):
+    """
+    Plot activation vector as a bar plot with values sorted from largest to smallest.
+    
+    Args:
+        activation_vector: Array of shape (t,) - unnormalized frame importance weights
+        video_id: Video ID
+        refiner_id: Refiner ID used
+        score: Prediction score
+        category_id: Category ID (optional)
+        output_path: Path to save the plot
+        frames_with_fish: List of original frame indices that contain fish annotations (optional)
+    """
+    # Sort values from largest to smallest
+    sorted_indices = np.argsort(activation_vector)[::-1]  # Descending order
+    sorted_values = activation_vector[sorted_indices]
+    
+    num_frames = len(activation_vector)
+    bar_positions = np.arange(num_frames)
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Map original frame indices to their new positions after sorting
+    if frames_with_fish is not None:
+        # Create a mapping from original index to sorted position
+        original_to_sorted = {orig_idx: sorted_pos for sorted_pos, orig_idx in enumerate(sorted_indices)}
+        
+        # Find sorted positions for frames with fish
+        sorted_positions_with_fish = []
+        for orig_idx in frames_with_fish:
+            if orig_idx in original_to_sorted:
+                sorted_positions_with_fish.append(original_to_sorted[orig_idx])
+        
+        # Add pale red background for bars corresponding to frames with fish
+        for sorted_pos in sorted_positions_with_fish:
+            if 0 <= sorted_pos < num_frames:
+                ax.axvspan(sorted_pos - 0.5, sorted_pos + 0.5, color='red', alpha=0.15, zorder=0)
+    
+    ax.bar(bar_positions, sorted_values, color='steelblue', alpha=0.7, zorder=2)
+    ax.set_xlabel('Frame Index (Sorted by Activation Value)', fontsize=12)
+    ax.set_ylabel('Activation Weight (Unnormalized)', fontsize=12)
+    
+    # Create title with video info
+    title = f'Video {video_id} - Activation Proj Weights (Sorted, Unnormalized)'
+    title += f'\nRefiner ID: {refiner_id}, Score: {score:.6f}'
+    if category_id is not None:
+        title += f', Category: {category_id}'
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    # Save plot
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  Saved sorted bar plot to {output_path}")
 
 
 def process_directory(base_dir: str, plot: bool = False) -> Dict:
@@ -174,6 +317,26 @@ def process_directory(base_dir: str, plot: bool = False) -> Dict:
     print("Finding top predictions per video...")
     top_predictions = find_top_predictions_per_video(results)
     print(f"Found top predictions for {len(top_predictions)} videos")
+    
+    # Find and analyze val JSON file
+    print("\nLooking for val JSON file...")
+    val_json_path = find_val_json(str(base_path))
+    frames_with_fish_data = {}
+    
+    if val_json_path:
+        print(f"Found val JSON file: {val_json_path}")
+        print("Analyzing frames with non-null annotations...")
+        frames_with_fish_data = analyze_frames_with_annotations(val_json_path)
+        print(f"Analyzed {len(frames_with_fish_data)} videos from val JSON")
+        
+        # Save frames with fish data
+        inference_dir = base_path / "inference"
+        frames_output_path = inference_dir / "val_frames_with_fish.json"
+        with open(frames_output_path, 'w') as f:
+            json.dump(frames_with_fish_data, f, indent=2)
+        print(f"Saved frames with fish data to {frames_output_path}")
+    else:
+        print("Warning: No val JSON file found in base directory")
     
     # Create plots directory if plotting is enabled
     plots_dir = None
@@ -226,10 +389,20 @@ def process_directory(base_dir: str, plot: bool = False) -> Dict:
         print(f"  Original range: [{activation_min:.6f}, {activation_max:.6f}]")
         print(f"  Normalized range: [{activation_vector_normalized.min():.6f}, {activation_vector_normalized.max():.6f}]")
         
-        # Create plot if requested (use normalized vector)
+        # Create plots if requested
         if plot and plots_dir is not None:
+            # Get frame indices with fish for this video (if available)
+            frames_with_fish = None
+            if video_id in frames_with_fish_data:
+                frames_with_fish = frames_with_fish_data[video_id].get('frame_indices', None)
+            
+            # Line plot with normalized vector (original frame order)
             plot_path = plots_dir / f"video_{video_id}_activation_proj_plot.png"
-            plot_activation_vector(activation_vector_normalized, video_id, refiner_id, score, category_id, str(plot_path))
+            plot_activation_vector(activation_vector_normalized, video_id, refiner_id, score, category_id, str(plot_path), frames_with_fish)
+            
+            # Bar plot with unnormalized vector (sorted largest to smallest)
+            bar_plot_path = plots_dir / f"video_{video_id}_activation_proj_sorted_bar.png"
+            plot_activation_vector_sorted_bar(activation_vector, video_id, refiner_id, score, category_id, str(bar_plot_path), frames_with_fish)
         
         # Store normalized results
         output_data[video_id] = {
