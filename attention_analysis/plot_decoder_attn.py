@@ -213,6 +213,9 @@ def map_attention_to_image(attention_1d: np.ndarray, H_feat: int, W_feat: int,
     """
     Map 1D attention weights to 2D image coordinates.
     
+    Each attention value corresponds to a patch center, not a corner. We map each
+    attention value to the center pixel of its corresponding patch in the image.
+    
     Args:
         attention_1d: 1D attention weights of shape (H_feat * W_feat,)
         H_feat, W_feat: Feature map dimensions
@@ -225,33 +228,104 @@ def map_attention_to_image(attention_1d: np.ndarray, H_feat: int, W_feat: int,
     # Reshape to 2D feature map
     attention_2d_feat = attention_1d.reshape(H_feat, W_feat)
     
-    # Upsample to original image size
-    # Use bilinear interpolation to map from feature space to image space
-    attention_2d = cv2.resize(
-        attention_2d_feat,
-        (original_img_width, original_img_height),
-        interpolation=cv2.INTER_LINEAR
-    )
+    # Each feature position (h, w) represents a patch covering:
+    #   Image pixels [h*stride : (h+1)*stride, w*stride : (w+1)*stride]
+    # The center of this patch is at ((h+0.5)*stride, (w+0.5)*stride) in image coordinates
+    
+    # To properly map attention values to patch centers, we need to account for
+    # the 0.5 offset. We'll use scipy's interpolation which allows precise coordinate mapping
+    try:
+        from scipy.ndimage import map_coordinates
+        
+        # Create coordinate grids for the output image
+        y_coords = np.arange(original_img_height, dtype=np.float32)
+        x_coords = np.arange(original_img_width, dtype=np.float32)
+        y_grid, x_grid = np.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        # Map image coordinates to feature map coordinates
+        # Each feature position h represents a patch covering [h*stride : (h+1)*stride]
+        # The center of this patch is at image coordinate (h+0.5)*stride
+        # 
+        # The attention value is stored at integer feature position h, but represents
+        # the patch center, which is conceptually at feature coordinate h+0.5.
+        # 
+        # When mapping image coordinate y to feature coordinate for interpolation:
+        # - If y = (h+0.5)*stride (patch center), we want to sample at feature coord h
+        #   (where the value is stored)
+        # - So: y/stride = h+0.5, therefore feature_coord = y/stride - 0.5 = h
+        # - This shifts the coordinate system to account for centers vs corners
+        feature_y = (y_grid / feature_stride) - 0.5
+        feature_x = (x_grid / feature_stride) - 0.5
+        
+        # Stack coordinates for map_coordinates (needs shape (2, H, W))
+        coordinates = np.stack([feature_y, feature_x])
+        
+        # Interpolate attention values at patch center coordinates
+        # Use 'nearest' mode to extend edge values smoothly to frame boundaries
+        # This ensures attention maps extend smoothly to the edges rather than having hard cutoffs
+        attention_2d = map_coordinates(
+            attention_2d_feat.astype(np.float32),
+            coordinates,
+            order=1,  # Bilinear interpolation
+            mode='nearest',  # Extend edge values to boundaries (smooth extension)
+            prefilter=False
+        )
+        
+    except ImportError:
+        # Fallback to cv2.resize if scipy is not available
+        # This treats positions as corners, not centers, so there will be a slight offset
+        # We can partially compensate by padding and adjusting
+        import warnings
+        warnings.warn("scipy not available, using cv2.resize (may have slight offset from patch centers)")
+        
+        # Pad the attention map to account for center offset and extend edges smoothly
+        # Use 'edge' mode to extend the boundary values, creating smooth extension to frame edges
+        padded_attn = np.pad(attention_2d_feat, ((1, 1), (1, 1)), mode='edge')
+        
+        # Upsample to slightly larger size to account for padding
+        upsampled_h = int(original_img_height * (H_feat + 2) / H_feat)
+        upsampled_w = int(original_img_width * (W_feat + 2) / W_feat)
+        
+        attention_upsampled = cv2.resize(
+            padded_attn,
+            (upsampled_w, upsampled_h),
+            interpolation=cv2.INTER_LINEAR
+        )
+        
+        # Crop to remove padding offset and get to original size
+        # Crop from (1, 1) to account for the padding we added
+        crop_y = int((upsampled_h - original_img_height) / 2)
+        crop_x = int((upsampled_w - original_img_width) / 2)
+        attention_2d = attention_upsampled[crop_y:crop_y+original_img_height, 
+                                           crop_x:crop_x+original_img_width]
     
     return attention_2d
 
 
 def overlay_attention_heatmap(image: np.ndarray, attention_2d: np.ndarray,
-                              alpha: float = 0.5, colormap: str = 'jet') -> np.ndarray:
+                              alpha: float = 0.5, colormap: str = 'jet',
+                              attn_min: Optional[float] = None, attn_max: Optional[float] = None) -> np.ndarray:
     """
     Overlay attention heatmap on image.
     
     Args:
         image: Original image as numpy array (H, W, 3) in RGB format
-        attention_2d: 2D attention map (H, W)
+        attention_2d: 2D attention map (H, W) - can be pre-normalized or raw values
         alpha: Transparency factor for heatmap overlay
         colormap: Matplotlib colormap name
+        attn_min: Optional minimum value for normalization (if None, uses attention_2d.min())
+        attn_max: Optional maximum value for normalization (if None, uses attention_2d.max())
     
     Returns:
         Overlaid image
     """
     # Normalize attention to [0, 1]
-    attn_norm = (attention_2d - attention_2d.min()) / (attention_2d.max() - attention_2d.min() + 1e-8)
+    if attn_min is None:
+        attn_min = attention_2d.min()
+    if attn_max is None:
+        attn_max = attention_2d.max()
+    
+    attn_norm = (attention_2d - attn_min) / (attn_max - attn_min + 1e-8)
     
     # Apply colormap
     cmap = cm.get_cmap(colormap) if hasattr(cm, 'get_cmap') else plt.get_cmap(colormap)
@@ -465,6 +539,54 @@ def load_video_frames(directory: str, video_id: int, frame_start: int, frame_end
     return frames
 
 
+def load_temporal_attention_weights(directory: str, video_id: int) -> Optional[np.ndarray]:
+    """
+    Load temporal attention weights (activation_proj vector) from JSON file.
+    
+    Args:
+        directory: Base directory containing inference/ subdirectory
+        video_id: Video ID
+    
+    Returns:
+        Temporal attention weights array of shape (num_frames,) or None if not found
+    """
+    # Look for activation_proj_top_predictions.json in inference/ subdirectory
+    json_path = os.path.join(directory, "inference", "activation_proj_top_predictions.json")
+    
+    if not os.path.exists(json_path):
+        print(f"Warning: activation_proj_top_predictions.json not found at {json_path}")
+        return None
+    
+    try:
+        import json
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        
+        # Convert video_id to string for lookup
+        video_id_str = str(video_id)
+        
+        if video_id_str not in data:
+            print(f"Warning: Video {video_id} not found in activation_proj_top_predictions.json")
+            return None
+        
+        video_data = data[video_id_str]
+        
+        if 'activation_vector' not in video_data:
+            print(f"Warning: 'activation_vector' not found for video {video_id}")
+            return None
+        
+        # Convert list to numpy array
+        activation_vector = np.array(video_data['activation_vector'])
+        
+        print(f"Loaded activation_proj vector for video {video_id}: shape {activation_vector.shape}, refiner_id={video_data.get('refiner_id', 'unknown')}")
+        
+        return activation_vector
+        
+    except Exception as e:
+        print(f"Warning: Could not load activation_proj weights from {json_path}: {e}")
+        return None
+
+
 def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                             predictor_query_ids_by_frame: Optional[Dict],
                             frame_start: int, frame_end: int,
@@ -473,9 +595,39 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                             size_list: Optional[List[Tuple[int, int]]] = None,
                             output_img_height: Optional[int] = None,
                             output_img_width: Optional[int] = None,
-                            query_choice: str = "top"):
+                            query_choice: str = "top",
+                            colour_scale: str = "per_frame",
+                            temporal_attention_weights: Optional[np.ndarray] = None):
     """
     Plot attention maps for queries across multiple layers, using per-frame query IDs.
+    
+    Colour scaling modes:
+    
+    1. "per_frame" (default):
+       - Normalize each frame independently: attn_norm = (attn - attn.min()) / (attn.max() - attn.min())
+       - Each frame's highest attention value gets deepest red
+       - Colour scale is NOT consistent across frames
+    
+    2. "across_frames":
+       - Compute global min/max across ALL frames: global_min = min(all_frames), global_max = max(all_frames)
+       - Normalize each frame using global min/max: attn_norm = (attn - global_min) / (global_max - global_min)
+       - Red is assigned to the highest attention value across ALL frames
+       - Colour scale IS consistent across frames (allows comparison of attention magnitudes)
+    
+    3. "temporal_per_frame":
+       - Step 1: Normalize each frame independently to [0, 1]: attn_norm = (attn - attn.min()) / (attn.max() - attn.min())
+       - Step 2: Scale normalized frame by temporal attention weight: attn_scaled = attn_norm * temporal_weight[frame]
+       - Step 3: Use global max across all scaled frames as peak value for heatmap (min = 0)
+       - Each frame is normalized independently, then modulated by temporal importance
+       - Frames with higher temporal attention get amplified
+       - Color scale is consistent across frames using global max as peak
+    
+    4. "temporal_across_frames":
+       - Step 1: Scale each frame by temporal attention weight: attn_scaled = attn * temporal_weight[frame]
+       - Step 2: Compute global min/max across ALL scaled frames: global_min = min(all_scaled_frames), global_max = max(all_scaled_frames)
+       - Step 3: Normalize each scaled frame using global min/max: attn_norm = (attn_scaled - global_min) / (global_max - global_min)
+       - Equivalent to: multiply decoder attention by temporal weights, then normalize across all frames
+       - Colour scale IS consistent across frames, with temporal weighting applied
     
     Args:
         attn_dir: Directory containing attention maps
@@ -491,11 +643,13 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
         frames: List of video frames
         size_list: Optional list of (H_feat, W_feat) tuples for each feature level [level0, level1, level2]
         query_choice: Method used - "top" or "weighted_sum"
+        colour_scale: Colour scaling mode - "per_frame", "across_frames", "temporal_per_frame", or "temporal_across_frames"
+        temporal_attention_weights: Optional array of temporal attention weights, shape (num_frames,)
     """
     # Plot for each layer
     for layer_idx in layer_indices:
-        # Create layer-specific output directory: output_dir/video_{video_id}/layer_{layer_idx}/
-        layer_output_dir = os.path.join(output_dir, f"video_{video_id}", f"layer_{layer_idx}")
+        # Create layer-specific output directory: output_dir/{colour_scale}/video_{video_id}/layer_{layer_idx}/
+        layer_output_dir = os.path.join(output_dir, colour_scale, f"video_{video_id}", f"layer_{layer_idx}")
         os.makedirs(layer_output_dir, exist_ok=True)
         # Determine feature level from layer index (cycles every 3 layers)
         feature_level = layer_idx % 3
@@ -589,12 +743,12 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                     break
             print(f"Adjusted: H_feat={H_feat}, W_feat={W_feat}")
         
-        # Plot for each frame
+        # Collect all attention maps first (needed for across_frames scaling modes)
+        all_attention_2d_maps = [None] * num_frames  # Indexed by frame_idx
+        query_ids_by_frame_idx = [None] * num_frames  # Store query IDs for filename generation, indexed by frame_idx
+        
         for frame_idx in range(num_frames):
-            # Calculate the absolute frame number (frame_start + frame_idx)
             absolute_frame_num = frame_start + frame_idx
-            # The predictor_query_ids_by_frame dictionary uses frame numbers as strings starting from '1'
-            # Frame 0 is not in the dictionary, so we show the original image without attention overlay
             frame_key = str(absolute_frame_num)
             
             # Determine if we should plot attention for this frame
@@ -602,40 +756,121 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             query_id_for_frame = None
             tracker_attention_weights_for_frame = None
             
-            if predictor_query_ids_by_frame is not None:
-                # Check if this frame has a query ID or attention weights assigned
-                if frame_key in predictor_query_ids_by_frame:
-                    frame_value = predictor_query_ids_by_frame[frame_key]
-                    
-                    if query_choice == "weighted_sum":
-                        # For weighted_sum, frame_value is a numpy array of attention weights
-                        if isinstance(frame_value, np.ndarray):
-                            tracker_attention_weights_for_frame = frame_value
-                            # Validate length matches num_queries
-                            if len(tracker_attention_weights_for_frame) != num_queries:
-                                raise ValueError(
-                                    f"Attention weights length ({len(tracker_attention_weights_for_frame)}) != num_queries ({num_queries}) "
-                                    f"for layer {layer_idx}, frame {absolute_frame_num}"
-                                )
+            if predictor_query_ids_by_frame is not None and frame_key in predictor_query_ids_by_frame:
+                frame_value = predictor_query_ids_by_frame[frame_key]
+                
+                if query_choice == "weighted_sum":
+                    if isinstance(frame_value, np.ndarray):
+                        tracker_attention_weights_for_frame = frame_value
+                        if len(tracker_attention_weights_for_frame) == num_queries:
                             should_plot_attention = True
-                        else:
-                            print(f"Warning: Expected numpy array for weighted_sum, got {type(frame_value)} for frame {absolute_frame_num}, skipping")
-                            should_plot_attention = False
-                    else:
-                        # For "top", frame_value is an integer query ID
-                        query_id_for_frame = int(frame_value)
-                        if query_id_for_frame >= num_queries:
-                            print(f"Warning: query_id {query_id_for_frame} >= num_queries {num_queries} for layer {layer_idx}, frame {absolute_frame_num}, skipping attention")
-                            should_plot_attention = False
-                        else:
-                            should_plot_attention = True
-                # Frame 0 (or frames not in dictionary) will not have attention overlay
                 else:
-                    should_plot_attention = False
+                    query_id_for_frame = int(frame_value)
+                    if query_id_for_frame < num_queries:
+                        should_plot_attention = True
+            
+            if should_plot_attention:
+                # Compute attention map for this frame
+                if query_choice == "weighted_sum" and tracker_attention_weights_for_frame is not None:
+                    decoder_attn_maps = attention_weights[frame_idx, :, :]
+                    weighted_sum_attn_1d = np.sum(
+                        tracker_attention_weights_for_frame[:, np.newaxis] * decoder_attn_maps,
+                        axis=0
+                    )
+                    attn_1d = weighted_sum_attn_1d
+                elif query_id_for_frame is not None:
+                    attn_1d = attention_weights[frame_idx, query_id_for_frame, :]
+                else:
+                    attn_1d = None
+                
+                if attn_1d is not None:
+                    # Map to image coordinates
+                    attn_2d = map_attention_to_image(
+                        attn_1d, H_feat, W_feat,
+                        original_img_height, original_img_width,
+                        feature_stride
+                    )
+                    all_attention_2d_maps[frame_idx] = attn_2d
+                    query_ids_by_frame_idx[frame_idx] = query_id_for_frame
+        
+        # Apply colour scaling based on mode
+        # Steps for each mode:
+        # 1. per_frame: Normalize each frame independently (min/max per frame) - handled in overlay function
+        # 2. across_frames: Normalize across all frames (global min/max)
+        # 3. temporal_per_frame: 
+        #    a) Normalize each frame independently to [0, 1]
+        #    b) Scale each normalized frame by its temporal attention weight
+        #    c) Use global max across all scaled frames as peak value for heatmap
+        # 4. temporal_across_frames:
+        #    a) Scale each frame by its temporal attention weight
+        #    b) Normalize across all frames (global min/max of scaled values)
+        
+        # Step 1: Apply temporal scaling BEFORE normalization for temporal_across_frames
+        if colour_scale == "temporal_across_frames":
+            if temporal_attention_weights is not None:
+                for frame_idx in range(num_frames):
+                    if all_attention_2d_maps[frame_idx] is not None:
+                        absolute_frame_num = frame_start + frame_idx
+                        if absolute_frame_num < len(temporal_attention_weights):
+                            # Scale attention map by temporal weight
+                            all_attention_2d_maps[frame_idx] = all_attention_2d_maps[frame_idx] * temporal_attention_weights[absolute_frame_num]
             else:
-                # Backward compatibility: if predictor_query_ids_by_frame is None, skip this frame
-                # (This shouldn't happen with the new format, but handle gracefully)
-                should_plot_attention = False
+                print(f"Warning: temporal attention weights not available for video {video_id}, ignoring temporal scaling")
+        
+        # Step 2: Apply temporal scaling for temporal_per_frame (normalize per frame, scale by temporal, find global max)
+        if colour_scale == "temporal_per_frame":
+            if temporal_attention_weights is not None:
+                # Process all frames: normalize per frame, scale by temporal weight
+                for frame_idx in range(num_frames):
+                    if all_attention_2d_maps[frame_idx] is not None:
+                        absolute_frame_num = frame_start + frame_idx
+                        if absolute_frame_num < len(temporal_attention_weights):
+                            attn_2d = all_attention_2d_maps[frame_idx]
+                            # Step 1: Normalize per frame to [0, 1]
+                            attn_min_frame = attn_2d.min()
+                            attn_max_frame = attn_2d.max()
+                            if attn_max_frame > attn_min_frame:
+                                attn_2d_norm = (attn_2d - attn_min_frame) / (attn_max_frame - attn_min_frame)
+                            else:
+                                attn_2d_norm = attn_2d - attn_min_frame  # All zeros or constant
+                            
+                            # Step 2: Scale by temporal weight
+                            temporal_weight = temporal_attention_weights[absolute_frame_num]
+                            attn_2d_scaled = attn_2d_norm * temporal_weight
+                            
+                            # Store the scaled version
+                            all_attention_2d_maps[frame_idx] = attn_2d_scaled
+                
+                # Step 3: Find global max across all scaled frames
+                valid_maps = [m for m in all_attention_2d_maps if m is not None]
+                if valid_maps:
+                    global_max_temporal = max(m.max() for m in valid_maps)
+                else:
+                    global_max_temporal = 1.0
+            else:
+                print(f"Warning: temporal attention weights not available for video {video_id}, ignoring temporal scaling")
+                global_max_temporal = None
+        else:
+            global_max_temporal = None
+        
+        # Step 3: Compute global min/max if needed for across_frames modes
+        if colour_scale in ["across_frames", "temporal_across_frames"]:
+            # Compute global min/max across all valid frames
+            valid_maps = [m for m in all_attention_2d_maps if m is not None]
+            if valid_maps:
+                global_min = min(m.min() for m in valid_maps)
+                global_max = max(m.max() for m in valid_maps)
+            else:
+                global_min = 0.0
+                global_max = 1.0
+        else:
+            global_min = None
+            global_max = None
+        
+        # Plot for each frame using pre-computed attention maps
+        for frame_idx in range(num_frames):
+            # Calculate the absolute frame number (frame_start + frame_idx)
+            absolute_frame_num = frame_start + frame_idx
             
             # Load frame if available
             if frames and frame_idx < len(frames) and frames[frame_idx] is not None:
@@ -652,44 +887,34 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                 for j in range(0, original_img_width, 50):
                     frame[:, j] = [128, 128, 128]
             
-            # Apply attention overlay if we have a valid query ID or attention weights for this frame
-            if should_plot_attention:
-                if query_choice == "weighted_sum" and tracker_attention_weights_for_frame is not None:
-                    # Weighted sum: combine all decoder query attention maps weighted by tracker attention weights
-                    # Get all decoder attention maps for this frame: (num_queries, spatial_length)
-                    decoder_attn_maps = attention_weights[frame_idx, :, :]
-                    
-                    # Compute weighted sum: sum(weights[i] * decoder_attn[i] for i in range(num_queries))
-                    weighted_sum_attn_1d = np.sum(
-                        tracker_attention_weights_for_frame[:, np.newaxis] * decoder_attn_maps,
-                        axis=0
-                    )
-                    
-                    # Map to image coordinates (using original dimensions for attention mapping)
-                    attn_2d = map_attention_to_image(
-                        weighted_sum_attn_1d, H_feat, W_feat,
-                        original_img_height, original_img_width,
-                        feature_stride
-                    )
-                    
-                    # Overlay attention (at original dimensions)
-                    overlaid = overlay_attention_heatmap(frame, attn_2d, alpha=0.5)
-                elif query_id_for_frame is not None:
-                    # Single query: get attention for this query and frame
-                    attn_1d = attention_weights[frame_idx, query_id_for_frame, :]
-                    
-                    # Map to image coordinates (using original dimensions for attention mapping)
-                    attn_2d = map_attention_to_image(
-                        attn_1d, H_feat, W_feat,
-                        original_img_height, original_img_width,
-                        feature_stride
-                    )
-                    
-                    # Overlay attention (at original dimensions)
-                    overlaid = overlay_attention_heatmap(frame, attn_2d, alpha=0.5)
+            # Get pre-computed attention map for this frame
+            attn_2d = all_attention_2d_maps[frame_idx]
+            
+            if attn_2d is not None:
+                # Handle temporal_per_frame: use global max across all scaled frames
+                if colour_scale == "temporal_per_frame":
+                    if global_max_temporal is not None:
+                        # Use global max as peak value, min is 0 (since we normalized to [0,1] before scaling)
+                        attn_min = 0.0
+                        attn_max = global_max_temporal
+                    else:
+                        # Fallback to per_frame if temporal weights not loaded
+                        attn_min = None
+                        attn_max = None
+                elif colour_scale in ["across_frames", "temporal_across_frames"]:
+                    # Use global min/max computed earlier
+                    attn_min = global_min
+                    attn_max = global_max
                 else:
-                    # Fallback: just use the original frame
-                    overlaid = frame.copy()
+                    # per_frame: normalize per frame
+                    attn_min = None  # Will use attn_2d.min() in overlay function
+                    attn_max = None  # Will use attn_2d.max() in overlay function
+                
+                # Overlay attention with appropriate normalization
+                overlaid = overlay_attention_heatmap(
+                    frame, attn_2d, alpha=0.5,
+                    attn_min=attn_min, attn_max=attn_max
+                )
             else:
                 # For frame 0 or frames without query IDs, just use the original frame
                 overlaid = frame.copy()
@@ -703,6 +928,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             
             # Save plot in layer-specific directory
             # Use the query ID in the filename if available, otherwise use a placeholder
+            query_id_for_frame = query_ids_by_frame_idx[frame_idx]
             if query_choice == "weighted_sum":
                 query_label = "weighted_sum"
             elif query_id_for_frame is not None:
@@ -720,7 +946,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             overlaid_bgr = cv2.cvtColor(overlaid, cv2.COLOR_RGB2BGR)
             cv2.imwrite(output_path, overlaid_bgr)
     
-    print(f"Saved attention plots for video {video_id} to {output_dir}/video_{video_id}/")
+    print(f"Saved attention plots for video {video_id} to {output_dir}/{colour_scale}/video_{video_id}/")
 
 
 def load_image_dimensions_from_eval(directory, video_id):
@@ -788,6 +1014,16 @@ def main():
         choices=["top", "weighted_sum"],
         default="weighted_sum",
         help="Method to choose decoder query ID: 'top' uses layer 5's top index from tracker_attention_top5.json, 'weighted_sum' uses weighted combination (default: top)"
+    )
+    parser.add_argument(
+        "--colour-scale",
+        type=str,
+        choices=["per_frame", "across_frames", "temporal_per_frame", "temporal_across_frames"],
+        default="per_frame",
+        help="Colour scaling method: 'per_frame' normalizes each frame independently (default), "
+             "'across_frames' normalizes across all frames, "
+             "'temporal_per_frame' normalizes per frame then scales by temporal weights, "
+             "'temporal_across_frames' normalizes across frames then scales by temporal weights"
     )
     
     args = parser.parse_args()
@@ -944,6 +1180,21 @@ def main():
         if output_img_width is None:
             output_img_width = original_img_width
         
+        # Load temporal attention weights (activation_proj) if needed for temporal scaling modes
+        temporal_attention_weights = None
+        if args.colour_scale in ["temporal_per_frame", "temporal_across_frames"]:
+            temporal_attention_weights = load_temporal_attention_weights(directory, video_id)
+            if temporal_attention_weights is not None:
+                print(f"Loaded activation_proj weights (temporal importance): shape {temporal_attention_weights.shape}")
+            else:
+                print(f"Warning: Could not load activation_proj weights for video {video_id}")
+                print(f"Falling back to non-temporal scaling mode")
+                # Fallback to non-temporal version
+                if args.colour_scale == "temporal_per_frame":
+                    args.colour_scale = "per_frame"
+                elif args.colour_scale == "temporal_across_frames":
+                    args.colour_scale = "across_frames"
+        
         # Process each window separately
         for window_start, window_end in available_windows:
             print(f"\nProcessing window: frames {window_start}-{window_end}")
@@ -1036,7 +1287,9 @@ def main():
                 frames, size_list=size_list,
                 output_img_height=output_img_height,
                 output_img_width=output_img_width,
-                query_choice=args.query_choice
+                query_choice=args.query_choice,
+                colour_scale=args.colour_scale,
+                temporal_attention_weights=temporal_attention_weights
             )
     
     print(f"\nDone! Plots saved to {output_dir}")
