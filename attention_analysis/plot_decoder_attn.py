@@ -338,6 +338,220 @@ def overlay_attention_heatmap(image: np.ndarray, attention_2d: np.ndarray,
     return overlaid
 
 
+def overlay_attention_grid_heatmap(image: np.ndarray, attention_2d: np.ndarray,
+                                   H_feat: int, W_feat: int, feature_stride: int,
+                                   attn_min: Optional[float] = None, attn_max: Optional[float] = None,
+                                   alpha: float = 0.3, colormap: str = 'viridis',
+                                   threshold: Optional[float] = None, blur_sigma: Optional[float] = None) -> np.ndarray:
+    """
+    Overlay attention as grid of colored patches with Gaussian blur for smooth gradients.
+    Each patch is first drawn as a solid color based on its attention value, then Gaussian blur
+    is applied to create smooth transitions between patches.
+    
+    Args:
+        image: Original image as numpy array (H, W, 3) in RGB format
+        attention_2d: 2D attention map (H, W) - can be pre-normalized or raw values
+        H_feat, W_feat: Feature map dimensions (patch grid size)
+        feature_stride: Downsampling factor (pixels per patch)
+        attn_min: Optional minimum value for normalization (if None, uses attention_2d.min())
+        attn_max: Optional maximum value for normalization (if None, uses attention_2d.max())
+        alpha: Transparency factor for heatmap overlay (default: 0.3 for quite transparent)
+        colormap: Matplotlib colormap name (default: 'viridis' - perceptually uniform and colorblind-friendly)
+        threshold: Minimum normalized attention value to draw patch (default: None - draw all patches)
+        blur_sigma: Standard deviation for Gaussian blur (default: None - auto-calculate based on patch size)
+    
+    Returns:
+        Overlaid image with colored patch grid and smooth gradients
+    """
+    # Make a copy of the image to draw on
+    overlaid = image.copy()
+    
+    # Normalize attention to [0, 1]
+    if attn_min is None:
+        attn_min = attention_2d.min()
+    if attn_max is None:
+        attn_max = attention_2d.max()
+    
+    attn_norm = (attention_2d - attn_min) / (attn_max - attn_min + 1e-8)
+    
+    # Get image dimensions
+    img_height, img_width = image.shape[:2]
+    
+    # Get colormap
+    cmap = cm.get_cmap(colormap) if hasattr(cm, 'get_cmap') else plt.get_cmap(colormap)
+    
+    # Convert feature_stride to int to ensure integer coordinates
+    feature_stride_int = int(round(feature_stride))
+    
+    # First, create an attention value map (not colored yet) where each patch has its attention value
+    attention_map = np.zeros((img_height, img_width), dtype=np.float32)
+    
+    # Draw attention values for each grid position
+    for h in range(H_feat):
+        for w in range(W_feat):
+            # Calculate patch boundaries in image coordinates
+            # Each patch covers [h*stride : (h+1)*stride, w*stride : (w+1)*stride]
+            y_start = int(h * feature_stride_int)
+            y_end = int(min((h + 1) * feature_stride_int, img_height))
+            x_start = int(w * feature_stride_int)
+            x_end = int(min((w + 1) * feature_stride_int, img_width))
+            
+            # Sample attention value from the center of the patch region
+            center_y = int((y_start + y_end) // 2)
+            center_x = int((x_start + x_end) // 2)
+            center_y = min(center_y, img_height - 1)
+            center_x = min(center_x, img_width - 1)
+            
+            # Get normalized attention value at patch center
+            patch_attn_norm = attn_norm[center_y, center_x]
+            
+            # Skip patches with attention below threshold (if threshold is set)
+            if threshold is not None and patch_attn_norm < threshold:
+                continue
+            
+            # Fill the entire patch with this attention value
+            attention_map[y_start:y_end, x_start:x_end] = patch_attn_norm
+    
+    # Apply Gaussian blur to the attention values to create smooth gradients
+    if blur_sigma is None:
+        # Auto-calculate blur sigma based on patch size (about 20-25% of patch size for good transitions)
+        blur_sigma = max(1.5, feature_stride_int * 0.22)
+    
+    try:
+        from scipy.ndimage import gaussian_filter
+        # Blur the attention values (not the colors)
+        attention_map_blurred = gaussian_filter(attention_map, sigma=blur_sigma)
+    except ImportError:
+        # Fallback to cv2.GaussianBlur if scipy not available
+        import warnings
+        warnings.warn("scipy not available, using cv2.GaussianBlur")
+        blur_size = max(3, int(blur_sigma * 6))  # Convert sigma to kernel size
+        if blur_size % 2 == 0:
+            blur_size += 1  # Ensure odd kernel size
+        attention_map_blurred = cv2.GaussianBlur(attention_map, (blur_size, blur_size), blur_sigma)
+    
+    # Now convert the blurred attention values to colors using the colormap
+    # This ensures proper color transitions through the colormap space
+    # Clamp attention values to [0, 1] range for colormap
+    attention_map_blurred = np.clip(attention_map_blurred, 0.0, 1.0)
+    
+    # Apply colormap to blurred attention values (returns RGBA)
+    colored = cmap(attention_map_blurred)  # Shape: (H, W, 4) with RGBA
+    overlay = (colored[:, :, :3] * 255).astype(np.float32)  # Extract RGB and scale to 0-255
+    
+    # Blend overlay with original image using transparency
+    overlay_uint8 = overlay.astype(np.uint8)
+    overlaid = (alpha * overlay_uint8 + (1 - alpha) * image).astype(np.uint8)
+    
+    return overlaid
+
+
+def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
+                              H_feat: int, W_feat: int, feature_stride: int,
+                              attn_min: Optional[float] = None, attn_max: Optional[float] = None,
+                              threshold: float = 0.01) -> np.ndarray:
+    """
+    Overlay attention as grid of patches with red square outlines.
+    Line thickness corresponds to attention value (1-5 pixels).
+    Patches with attention below threshold are not drawn.
+    
+    Args:
+        image: Original image as numpy array (H, W, 3) in RGB format
+        attention_2d: 2D attention map (H, W) - can be pre-normalized or raw values
+        H_feat, W_feat: Feature map dimensions (patch grid size)
+        feature_stride: Downsampling factor (pixels per patch)
+        attn_min: Optional minimum value for normalization (if None, uses attention_2d.min())
+        attn_max: Optional maximum value for normalization (if None, uses attention_2d.max())
+        threshold: Minimum normalized attention value to draw patch (default: 0.01)
+    
+    Returns:
+        Overlaid image with red square outlines
+    """
+    # Make a copy of the image to draw on
+    # Convert to BGR for cv2.rectangle (cv2 functions expect BGR)
+    overlaid_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR).copy()
+    
+    # Normalize attention to [0, 1]
+    if attn_min is None:
+        attn_min = attention_2d.min()
+    if attn_max is None:
+        attn_max = attention_2d.max()
+    
+    attn_norm = (attention_2d - attn_min) / (attn_max - attn_min + 1e-8)
+    
+    # Get image dimensions
+    img_height, img_width = image.shape[:2]
+    
+    # Red color in BGR format (for cv2.rectangle)
+    red_bgr = (0, 0, 255)  # BGR
+    
+    # Draw squares for each patch with transparency based on attention
+    # Convert feature_stride to int to ensure integer coordinates
+    feature_stride_int = int(round(feature_stride))
+    
+    for h in range(H_feat):
+        for w in range(W_feat):
+            # Calculate patch boundaries in image coordinates
+            # Each patch covers [h*stride : (h+1)*stride, w*stride : (w+1)*stride]
+            y_start = int(h * feature_stride_int)
+            y_end = int(min((h + 1) * feature_stride_int, img_height))
+            x_start = int(w * feature_stride_int)
+            x_end = int(min((w + 1) * feature_stride_int, img_width))
+            
+            # Sample attention value from the center of the patch region
+            # Use the center pixel or average over the patch region
+            center_y = int((y_start + y_end) // 2)
+            center_x = int((x_start + x_end) // 2)
+            center_y = min(center_y, img_height - 1)
+            center_x = min(center_x, img_width - 1)
+            
+            # Get normalized attention value at patch center
+            patch_attn_norm = attn_norm[center_y, center_x]
+            
+            # Skip patches with attention below threshold
+            if patch_attn_norm < threshold:
+                continue
+            
+            # Calculate line thickness: 1-5 pixels based on normalized attention
+            thickness = 1 + int(4 * patch_attn_norm)
+            thickness = max(1, min(5, thickness))  # Clamp to [1, 5]
+            
+            # Calculate alpha (transparency) based on attention value
+            # Scale from threshold to 1.0 for alpha from 0.3 to 1.0
+            # Lower attention = more transparent
+            alpha_value = 0.3 + 0.7 * ((patch_attn_norm - threshold) / (1.0 - threshold + 1e-8))
+            alpha_value = max(0.3, min(1.0, alpha_value))  # Clamp to [0.3, 1.0]
+            
+            # Create temporary overlay for this rectangle only
+            temp_overlay = np.zeros_like(overlaid_bgr)
+            cv2.rectangle(
+                temp_overlay,
+                (int(x_start), int(y_start)),
+                (int(x_end - 1), int(y_end - 1)),  # -1 to avoid overlap with adjacent patches
+                red_bgr,
+                thickness=thickness
+            )
+            
+            # Create mask for where the rectangle was drawn
+            mask = np.any(temp_overlay > 0, axis=2)
+            
+            # Blend only the rectangle area with attention-based alpha
+            overlaid_float = overlaid_bgr.astype(np.float32)
+            temp_overlay_float = temp_overlay.astype(np.float32)
+            
+            overlaid_float[mask] = (
+                overlaid_float[mask] * (1.0 - alpha_value) + 
+                temp_overlay_float[mask] * alpha_value
+            )
+            
+            overlaid_bgr = np.clip(overlaid_float, 0, 255).astype(np.uint8)
+    
+    # Convert back to RGB for consistency with rest of code
+    overlaid = cv2.cvtColor(overlaid_bgr, cv2.COLOR_BGR2RGB)
+    
+    return overlaid
+
+
 def find_val_json(base_dir: str) -> Optional[str]:
     """
     Find the val JSON file in the base directory by looking for files with 'val' in the name.
@@ -622,38 +836,39 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                             output_img_height: Optional[int] = None,
                             output_img_width: Optional[int] = None,
                             query_choice: str = "top",
-                            colour_scale: str = "per_frame",
-                            temporal_attention_weights: Optional[np.ndarray] = None):
+                            scale: str = "per_frame",
+                            temporal_attention_weights: Optional[np.ndarray] = None,
+                            viz_type: str = "heatmap"):
     """
     Plot attention maps for queries across multiple layers, using per-frame query IDs.
     
-    Colour scaling modes:
+    Scaling modes:
     
     1. "per_frame" (default):
        - Normalize each frame independently: attn_norm = (attn - attn.min()) / (attn.max() - attn.min())
-       - Each frame's highest attention value gets deepest red
-       - Colour scale is NOT consistent across frames
+       - Each frame's highest attention value gets maximum visualization intensity
+       - Scale is NOT consistent across frames
     
     2. "across_frames":
        - Compute global min/max across ALL frames: global_min = min(all_frames), global_max = max(all_frames)
        - Normalize each frame using global min/max: attn_norm = (attn - global_min) / (global_max - global_min)
-       - Red is assigned to the highest attention value across ALL frames
-       - Colour scale IS consistent across frames (allows comparison of attention magnitudes)
+       - Maximum intensity is assigned to the highest attention value across ALL frames
+       - Scale IS consistent across frames (allows comparison of attention magnitudes)
     
     3. "temporal_per_frame":
        - Step 1: Normalize each frame independently to [0, 1]: attn_norm = (attn - attn.min()) / (attn.max() - attn.min())
        - Step 2: Scale normalized frame by temporal attention weight: attn_scaled = attn_norm * temporal_weight[frame]
-       - Step 3: Use global max across all scaled frames as peak value for heatmap (min = 0)
+       - Step 3: Use global max across all scaled frames as peak value for visualization (min = 0)
        - Each frame is normalized independently, then modulated by temporal importance
        - Frames with higher temporal attention get amplified
-       - Color scale is consistent across frames using global max as peak
+       - Scale is consistent across frames using global max as peak
     
     4. "temporal_across_frames":
        - Step 1: Scale each frame by temporal attention weight: attn_scaled = attn * temporal_weight[frame]
        - Step 2: Compute global min/max across ALL scaled frames: global_min = min(all_scaled_frames), global_max = max(all_scaled_frames)
        - Step 3: Normalize each scaled frame using global min/max: attn_norm = (attn_scaled - global_min) / (global_max - global_min)
        - Equivalent to: multiply decoder attention by temporal weights, then normalize across all frames
-       - Colour scale IS consistent across frames, with temporal weighting applied
+       - Scale IS consistent across frames, with temporal weighting applied
     
     Args:
         attn_dir: Directory containing attention maps
@@ -669,13 +884,14 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
         frames: List of video frames
         size_list: Optional list of (H_feat, W_feat) tuples for each feature level [level0, level1, level2]
         query_choice: Method used - "top" or "weighted_sum"
-        colour_scale: Colour scaling mode - "per_frame", "across_frames", "temporal_per_frame", or "temporal_across_frames"
+        scale: Scaling mode - "per_frame", "across_frames", "temporal_per_frame", or "temporal_across_frames"
         temporal_attention_weights: Optional array of temporal attention weights, shape (num_frames,)
+        viz_type: Visualization type - "heatmap" for colored heatmap overlay with interpolation, "grid" for red square outlines with thickness corresponding to attention, "grid_heatmap" for colored patches without interpolation
     """
     # Plot for each layer
     for layer_idx in layer_indices:
-        # Create layer-specific output directory: output_dir/{colour_scale}/video_{video_id}/layer_{layer_idx}/
-        layer_output_dir = os.path.join(output_dir, colour_scale, f"video_{video_id}", f"layer_{layer_idx}")
+        # Create layer-specific output directory: output_dir/{scale}/video_{video_id}/layer_{layer_idx}/
+        layer_output_dir = os.path.join(output_dir, scale, f"video_{video_id}", f"layer_{layer_idx}")
         os.makedirs(layer_output_dir, exist_ok=True)
         # Determine feature level from layer index (cycles every 3 layers)
         feature_level = layer_idx % 3
@@ -832,7 +1048,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
         #    b) Normalize across all frames (global min/max of scaled values)
         
         # Step 1: Apply temporal scaling BEFORE normalization for temporal_across_frames
-        if colour_scale == "temporal_across_frames":
+        if scale == "temporal_across_frames":
             if temporal_attention_weights is not None:
                 for frame_idx in range(num_frames):
                     if all_attention_2d_maps[frame_idx] is not None:
@@ -844,7 +1060,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                 print(f"Warning: temporal attention weights not available for video {video_id}, ignoring temporal scaling")
         
         # Step 2: Apply temporal scaling for temporal_per_frame (normalize per frame, scale by temporal, find global max)
-        if colour_scale == "temporal_per_frame":
+        if scale == "temporal_per_frame":
             if temporal_attention_weights is not None:
                 # Process all frames: normalize per frame, scale by temporal weight
                 for frame_idx in range(num_frames):
@@ -880,7 +1096,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             global_max_temporal = None
         
         # Step 3: Compute global min/max if needed for across_frames modes
-        if colour_scale in ["across_frames", "temporal_across_frames"]:
+        if scale in ["across_frames", "temporal_across_frames"]:
             # Compute global min/max across all valid frames
             valid_maps = [m for m in all_attention_2d_maps if m is not None]
             if valid_maps:
@@ -918,7 +1134,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             
             if attn_2d is not None:
                 # Handle temporal_per_frame: use global max across all scaled frames
-                if colour_scale == "temporal_per_frame":
+                if scale == "temporal_per_frame":
                     if global_max_temporal is not None:
                         # Use global max as peak value, min is 0 (since we normalized to [0,1] before scaling)
                         attn_min = 0.0
@@ -927,7 +1143,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                         # Fallback to per_frame if temporal weights not loaded
                         attn_min = None
                         attn_max = None
-                elif colour_scale in ["across_frames", "temporal_across_frames"]:
+                elif scale in ["across_frames", "temporal_across_frames"]:
                     # Use global min/max computed earlier
                     attn_min = global_min
                     attn_max = global_max
@@ -936,11 +1152,28 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                     attn_min = None  # Will use attn_2d.min() in overlay function
                     attn_max = None  # Will use attn_2d.max() in overlay function
                 
-                # Overlay attention with appropriate normalization
-                overlaid = overlay_attention_heatmap(
-                    frame, attn_2d, alpha=0.5,
-                    attn_min=attn_min, attn_max=attn_max
-                )
+                # Overlay attention with appropriate visualization method
+                if viz_type == "grid":
+                    # Use square patches visualization
+                    overlaid = overlay_attention_squares(
+                        frame, attn_2d, H_feat, W_feat, feature_stride,
+                        attn_min=attn_min, attn_max=attn_max
+                    )
+                elif viz_type == "grid_heatmap":
+                    # Use grid heatmap (colored patches without interpolation)
+                    overlaid = overlay_attention_grid_heatmap(
+                        frame, attn_2d, H_feat, W_feat, feature_stride,
+                        attn_min=attn_min, attn_max=attn_max,
+                        alpha=0.6,  # Less transparent for better visibility
+                        colormap='viridis',  # Perceptually uniform colormap
+                        threshold=None  # Draw all patches, no threshold
+                    )
+                else:
+                    # Use heatmap overlay (default) with interpolation
+                    overlaid = overlay_attention_heatmap(
+                        frame, attn_2d, alpha=0.5,
+                        attn_min=attn_min, attn_max=attn_max
+                    )
             else:
                 # For frame 0 or frames without query IDs, just use the original frame
                 overlaid = frame.copy()
@@ -962,9 +1195,10 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             else:
                 query_label = "no_query"
             
+            # Add visualization type to filename
             output_path = os.path.join(
                 layer_output_dir,
-                f"video_{video_id}_{query_label}_layer_{layer_idx}_frame_{absolute_frame_num}.png"
+                f"video_{video_id}_{query_label}_layer_{layer_idx}_frame_{absolute_frame_num}_{viz_type}.png"
             )
             
             # Save image directly without matplotlib padding/titles to preserve exact dimensions
@@ -972,7 +1206,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             overlaid_bgr = cv2.cvtColor(overlaid, cv2.COLOR_RGB2BGR)
             cv2.imwrite(output_path, overlaid_bgr)
     
-    print(f"Saved attention plots for video {video_id} to {output_dir}/{colour_scale}/video_{video_id}/")
+    print(f"Saved attention plots for video {video_id} to {output_dir}/{scale}/video_{video_id}/")
 
 
 def load_image_dimensions_from_eval(directory, video_id):
@@ -1039,17 +1273,24 @@ def main():
         type=str,
         choices=["top", "weighted_sum"],
         default="weighted_sum",
-        help="Method to choose decoder query ID: 'top' uses layer 5's top index from tracker_attention_top5.json, 'weighted_sum' uses weighted combination (default: top)"
+        help="Method to choose decoder query ID: 'top' uses layer 5's top index from tracker_attention_top5.json, 'weighted_sum' uses weighted combination (default: weighted_sum)"
     )
     parser.add_argument(
-        "--colour-scale",
+        "--scale",
         type=str,
         choices=["per_frame", "across_frames", "temporal_per_frame", "temporal_across_frames"],
         default="per_frame",
-        help="Colour scaling method: 'per_frame' normalizes each frame independently (default), "
+        help="Scaling method for attention values: 'per_frame' normalizes each frame independently (default), "
              "'across_frames' normalizes across all frames, "
              "'temporal_per_frame' normalizes per frame then scales by temporal weights, "
              "'temporal_across_frames' normalizes across frames then scales by temporal weights"
+    )
+    parser.add_argument(
+        "--viz-type",
+        type=str,
+        choices=["heatmap", "grid", "grid_heatmap"],
+        default="heatmap",
+        help="Visualization type: 'heatmap' overlays attention as colored heatmap with interpolation (default), 'grid' plots patches as red square outlines with thickness corresponding to attention, 'grid_heatmap' plots colored patches without interpolation"
     )
     
     args = parser.parse_args()
@@ -1214,7 +1455,7 @@ def main():
         
         # Load temporal attention weights (activation_proj) if needed for temporal scaling modes
         temporal_attention_weights = None
-        if args.colour_scale in ["temporal_per_frame", "temporal_across_frames"]:
+        if args.scale in ["temporal_per_frame", "temporal_across_frames"]:
             temporal_attention_weights = load_temporal_attention_weights(directory, video_id)
             if temporal_attention_weights is not None:
                 print(f"Loaded activation_proj weights (temporal importance): shape {temporal_attention_weights.shape}")
@@ -1222,10 +1463,10 @@ def main():
                 print(f"Warning: Could not load activation_proj weights for video {video_id}")
                 print(f"Falling back to non-temporal scaling mode")
                 # Fallback to non-temporal version
-                if args.colour_scale == "temporal_per_frame":
-                    args.colour_scale = "per_frame"
-                elif args.colour_scale == "temporal_across_frames":
-                    args.colour_scale = "across_frames"
+                if args.scale == "temporal_per_frame":
+                    args.scale = "per_frame"
+                elif args.scale == "temporal_across_frames":
+                    args.scale = "across_frames"
         
         # Process each window separately
         for window_start, window_end in available_windows:
@@ -1320,8 +1561,9 @@ def main():
                 output_img_height=output_img_height,
                 output_img_width=output_img_width,
                 query_choice=args.query_choice,
-                colour_scale=args.colour_scale,
-                temporal_attention_weights=temporal_attention_weights
+                scale=args.scale,
+                temporal_attention_weights=temporal_attention_weights,
+                viz_type=args.viz_type
             )
     
     print(f"\nDone! Plots saved to {output_dir}")
