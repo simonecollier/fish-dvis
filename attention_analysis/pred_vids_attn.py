@@ -6,6 +6,48 @@ import re
 from pathlib import Path
 from tqdm import tqdm
 from pycocotools import mask as mask_utils
+from typing import Optional
+
+def load_activation_proj_weights(inference_dir: str, video_id: int) -> Optional[np.ndarray]:
+    """
+    Load activation_proj weights (temporal importance) from JSON file.
+    
+    Args:
+        inference_dir: Directory containing activation_proj_top_predictions.json
+        video_id: Video ID
+    
+    Returns:
+        Activation vector array of shape (num_frames,) or None if not found
+    """
+    json_path = os.path.join(inference_dir, "activation_proj_top_predictions.json")
+    
+    if not os.path.exists(json_path):
+        return None
+    
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        
+        # Convert video_id to string for lookup
+        video_id_str = str(video_id)
+        
+        if video_id_str not in data:
+            return None
+        
+        video_data = data[video_id_str]
+        
+        if 'activation_vector' not in video_data:
+            return None
+        
+        # Convert list to numpy array
+        activation_vector = np.array(video_data['activation_vector'])
+        
+        return activation_vector
+        
+    except Exception as e:
+        print(f"  Warning: Could not load activation_proj weights from {json_path}: {e}")
+        return None
+
 
 def decode_rle(rle_obj, height, width):
     if isinstance(rle_obj['counts'], list):
@@ -236,6 +278,39 @@ def load_image_dimensions_from_eval(directory, video_id):
             raise KeyError(f"Video {video_id} not found in image_dimensions.json")
         return dims_dict[video_key]
 
+def extract_frame_number_from_png_filename(filename: str, video_id: int, layer_idx: int) -> Optional[int]:
+    """
+    Extract frame number from PNG filename.
+    
+    Supports patterns:
+    - video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}.png
+    - video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}.png
+    
+    Args:
+        filename: PNG filename (with or without path)
+        video_id: Video ID
+        layer_idx: Layer index
+    
+    Returns:
+        Frame number (0-based) if found, None otherwise
+    """
+    # Extract just the filename if path is provided
+    basename = os.path.basename(filename)
+    
+    # Try weighted_sum pattern first
+    weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+)\.png')
+    match = weighted_sum_pattern.match(basename)
+    if match:
+        return int(match.group(1))
+    
+    # Try query pattern
+    query_pattern = re.compile(rf'video_{video_id}_query_\d+_layer_{layer_idx}_frame_(\d+)\.png')
+    match = query_pattern.match(basename)
+    if match:
+        return int(match.group(1))
+    
+    return None
+
 def find_attention_images(decoder_attention_plots_dir: str, video_id: int, layer_idx: int) -> dict:
     """
     Find all attention images for a specific layer across all queries.
@@ -317,7 +392,30 @@ def find_available_layers(decoder_attention_plots_dir: str, video_id: int) -> li
     
     return sorted(layers)
 
-def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
+def find_available_colour_scales(decoder_attention_plots_base_dir):
+    """
+    Find available colour scale subdirectories in decoder_attention_plots directory.
+    
+    Args:
+        decoder_attention_plots_base_dir: Base directory containing colour scale subdirectories
+    
+    Returns:
+        List of available colour scale names
+    """
+    valid_colour_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
+    available_scales = []
+    
+    if not os.path.exists(decoder_attention_plots_base_dir):
+        return available_scales
+    
+    for scale in valid_colour_scales:
+        scale_dir = os.path.join(decoder_attention_plots_base_dir, scale)
+        if os.path.exists(scale_dir) and os.path.isdir(scale_dir):
+            available_scales.append(scale)
+    
+    return available_scales
+
+def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, colour_scale=None, reorder=False):
     """
     Create prediction videos with attention overlays from attention directory.
     
@@ -325,18 +423,66 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
         attention_dir: Path to attention extraction directory (e.g., /path/to/eval_attn_6059)
                       Should contain inference/decoder_attention_plots/ subdirectory
         val_json_path: Optional path to val.json file. If not provided, will search automatically.
+        colour_scale: Optional colour scale type ("across_frames", "per_frame", "temporal_across_frames", 
+                     "temporal_per_frame"). If None, processes all available colour scales.
+        reorder: If True, reorder frames according to max-to-min ordering of attention vector.
     """
     attention_dir = os.path.abspath(attention_dir)
     
     # Auto-detect paths
     inference_dir = os.path.join(attention_dir, "inference")
-    decoder_attention_plots_dir = os.path.join(inference_dir, "decoder_attention_plots")
+    decoder_attention_plots_base_dir = os.path.join(inference_dir, "decoder_attention_plots")
     results_json = os.path.join(inference_dir, "results_temporal.json")
     
-    if not os.path.exists(decoder_attention_plots_dir):
-        raise FileNotFoundError(f"Decoder attention plots directory not found: {decoder_attention_plots_dir}")
+    if not os.path.exists(decoder_attention_plots_base_dir):
+        raise FileNotFoundError(f"Decoder attention plots directory not found: {decoder_attention_plots_base_dir}")
     if not os.path.exists(results_json):
         raise FileNotFoundError(f"Results JSON not found: {results_json}")
+    
+    # Determine which colour scales to process
+    if colour_scale is not None:
+        valid_colour_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
+        if colour_scale not in valid_colour_scales:
+            raise ValueError(f"Invalid colour_scale: {colour_scale}. Must be one of {valid_colour_scales}")
+        colour_scales_to_process = [colour_scale]
+    else:
+        # Find all available colour scales
+        colour_scales_to_process = find_available_colour_scales(decoder_attention_plots_base_dir)
+        if not colour_scales_to_process:
+            raise FileNotFoundError(f"No valid colour scale subdirectories found in {decoder_attention_plots_base_dir}")
+        print(f"Found {len(colour_scales_to_process)} colour scale(s) to process: {colour_scales_to_process}")
+    
+    # Process each colour scale
+    for scale in colour_scales_to_process:
+        print(f"\n{'='*80}")
+        print(f"Processing colour scale: {scale}")
+        print(f"{'='*80}")
+        _visualize_predictions_for_colour_scale(
+            attention_dir, val_json_path, scale, decoder_attention_plots_base_dir, results_json, reorder=reorder
+        )
+
+def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour_scale, 
+                                           decoder_attention_plots_base_dir, results_json, reorder=False):
+    """
+    Internal function to process videos for a specific colour scale.
+    
+    Args:
+        attention_dir: Path to attention extraction directory
+        val_json_path: Optional path to val.json file
+        colour_scale: Colour scale type to process
+        decoder_attention_plots_base_dir: Base directory containing colour scale subdirectories
+        results_json: Path to results_temporal.json
+        reorder: If True, reorder frames according to max-to-min ordering of attention vector.
+    """
+    attention_dir = os.path.abspath(attention_dir)
+    
+    # Auto-detect paths
+    inference_dir = os.path.join(attention_dir, "inference")
+    decoder_attention_plots_dir = os.path.join(decoder_attention_plots_base_dir, colour_scale)
+    
+    if not os.path.exists(decoder_attention_plots_dir):
+        print(f"Warning: Colour scale directory not found: {decoder_attention_plots_dir}, skipping")
+        return
     
     # Find val.json
     try:
@@ -358,8 +504,8 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
         print(f"Warning: {e}")
         image_root = None  # Will only use attention images
     
-    # Output directory structure: attention_dir/inference/attn_pred_vids/video_X/layer_X/
-    output_base_dir = os.path.join(inference_dir, "attn_pred_vids")
+    # Output directory structure: attention_dir/inference/attn_pred_vids/{colour_scale}/video_X/layer_X/
+    output_base_dir = os.path.join(inference_dir, "attn_pred_vids", colour_scale)
     
     # Load results and validation data
     with open(results_json) as f:
@@ -460,38 +606,14 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
             mask = decode_rle(rle, height, width)
             frame_masks[fn].append((mask, color))
         
-        # Load per-frame importance if available (using nolayer0 version)
+        # Load per-frame importance from activation_proj JSON file
         importance_arr = None
         if refiner_id is not None:
-            try:
-                # Try nolayer0 version first (rolled_out is at attention_dir/attention_maps/rolled_out/)
-                rolled_out_dir = os.path.join(attention_dir, "attention_maps", "rolled_out")
-                colavg_norm_npz = os.path.join(rolled_out_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_nolayer0_col_avg_norm.npz")
-                if os.path.exists(colavg_norm_npz):
-                    data = np.load(colavg_norm_npz)
-                    if 'col_avg_norm' in data:
-                        importance_arr = data['col_avg_norm']
-                        print(f"  Loaded importance array (nolayer0): {len(importance_arr)} values")
-                    else:
-                        print(f"  Warning: 'col_avg_norm' key not found in {colavg_norm_npz}")
-                        print(f"    Available keys: {list(data.keys())}")
-                else:
-                    # Fallback to old location/format for backward compatibility
-                    colavg_norm_npz_old = os.path.join(attn_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg_norm.npz")
-                    if os.path.exists(colavg_norm_npz_old):
-                        data = np.load(colavg_norm_npz_old)
-                        if 'rollout_rownorm_colavg_norm' in data:
-                            importance_arr = data['rollout_rownorm_colavg_norm']
-                            print(f"  Loaded importance array (legacy format): {len(importance_arr)} values")
-                        else:
-                            print(f"  Warning: 'rollout_rownorm_colavg_norm' key not found in {colavg_norm_npz_old}")
-                            print(f"    Available keys: {list(data.keys())}")
-                    else:
-                        print(f"  Warning: Importance file not found: {colavg_norm_npz}")
-                        print(f"    Also tried legacy location: {colavg_norm_npz_old}")
-            except Exception as e:
-                print(f"  Warning: Error loading importance array: {e}")
-                importance_arr = None
+            importance_arr = load_activation_proj_weights(inference_dir, video_id)
+            if importance_arr is not None:
+                print(f"  Loaded activation_proj importance array: {len(importance_arr)} values")
+            else:
+                print(f"  Warning: Could not load activation_proj weights for video {video_id}")
         else:
             print(f"  Warning: No refiner_id available, cannot load importance array")
         
@@ -512,17 +634,55 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
             output_dir = os.path.join(output_base_dir, f"video_{video_id}")
             os.makedirs(output_dir, exist_ok=True)
             
+            # Compute reordering indices if requested (using importance_arr which is already loaded)
+            reorder_indices = None
+            if reorder and importance_arr is not None and len(importance_arr) == len(file_names):
+                # Get indices sorted from max (1) to min (0) - higher importance values come first
+                reorder_indices = np.argsort(importance_arr)[::-1]
+                print(f"    Using importance array for reordering: {len(importance_arr)} values")
+            elif reorder and importance_arr is None:
+                print(f"    Warning: Cannot reorder - importance array not available")
+            elif reorder and len(importance_arr) != len(file_names):
+                print(f"    Warning: Cannot reorder - importance array length ({len(importance_arr)}) doesn't match number of frames ({len(file_names)})")
+            
+            # Reorder file_names if reordering is requested
+            if reorder_indices is not None and len(reorder_indices) == len(file_names):
+                # Reorder file_names: reorder_indices[i] gives the original index that should be at position i
+                file_names_to_use = [file_names[i] for i in reorder_indices]
+            else:
+                # Use original data
+                file_names_to_use = file_names
+            
             # Output video path
-            output_video_path = os.path.join(output_dir, f"video_{video_id}_layer_{layer_idx}_attention.mp4")
+            reorder_suffix = "_reordered" if (reorder and reorder_indices is not None) else ""
+            output_video_path = os.path.join(output_dir, f"video_{video_id}_layer_{layer_idx}_attention{reorder_suffix}.mp4")
             fps = 10
             out = None
             
-            for frame_idx, fn in enumerate(file_names, start=1):
+            for frame_idx, fn in enumerate(file_names_to_use, start=1):
+                # Map frame_idx back to original index if reordered
+                if reorder_indices is not None and len(reorder_indices) == len(file_names):
+                    # frame_idx is 1-based, convert to 0-based for lookup
+                    # reorder_indices[frame_idx - 1] gives the original frame index at this position
+                    original_frame_idx = reorder_indices[frame_idx - 1]
+                else:
+                    original_frame_idx = frame_idx - 1
+                
                 # Use attention image if available, otherwise fall back to original frame
-                if (frame_idx - 1) in attention_frame_map:
-                    img_path = attention_frame_map[frame_idx - 1]
+                # Use original_frame_idx to look up in attention_frame_map (which uses original indices)
+                if original_frame_idx in attention_frame_map:
+                    img_path = attention_frame_map[original_frame_idx]
+                    # Extract frame number from PNG filename (1-based)
+                    png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx)
+                    if png_frame_num is not None:
+                        display_frame_num = png_frame_num + 1  # Convert to 1-based
+                    else:
+                        # Fallback to original frame index if extraction fails
+                        display_frame_num = original_frame_idx + 1
                 elif image_root:
                     img_path = os.path.join(image_root, fn)
+                    # Use original frame index (1-based)
+                    display_frame_num = original_frame_idx + 1
                 else:
                     print(f"    Warning: No image available for frame {frame_idx}, skipping")
                     continue
@@ -541,16 +701,23 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None):
                 
                 # Determine importance value for this frame index (0-based)
                 imp_val = None
-                if importance_arr is not None and (frame_idx - 1) < len(importance_arr):
-                    imp_val = float(importance_arr[frame_idx - 1])
+                if importance_arr is not None:
+                    if reorder_indices is not None and len(reorder_indices) == len(file_names):
+                        # Use original frame index for importance lookup
+                        if original_frame_idx < len(importance_arr):
+                            imp_val = float(importance_arr[original_frame_idx])
+                    elif (frame_idx - 1) < len(importance_arr):
+                        imp_val = float(importance_arr[frame_idx - 1])
                 
                 # Draw frame number, refiner ID, and importance in bottom right corner
-                draw_frame_refiner_and_importance(frame, frame_idx, total_frames, refiner_id, imp_val)
+                # Use frame number from PNG filename (or original frame index) instead of loop index
+                draw_frame_refiner_and_importance(frame, display_frame_num, total_frames, refiner_id, imp_val)
                 
                 # Draw original name (folder_name) in top right corner, small font
                 draw_small_top_right_label(frame, folder_name)
                 
                 # Draw mask outline (masks are already at correct dimensions)
+                # fn is already the reordered filename, so we can use it directly with frame_masks
                 for mask, color in frame_masks.get(fn, []):
                     draw_mask_outline(frame, mask, color)
                 
@@ -619,6 +786,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
     # Derive run_dir to locate attention maps (two levels up from results_json)
     run_dir = os.path.dirname(os.path.dirname(results_json))
     attn_maps_dir = os.path.join(run_dir, "inference", "attention_maps")
+    # Derive inference_dir (one level up from results_json)
+    inference_dir = os.path.dirname(results_json)
     
     # If decoder_attention_plots_dir is provided, use attention images instead of original frames
     use_attention_images = decoder_attention_plots_dir is not None and os.path.exists(decoder_attention_plots_dir)
@@ -676,17 +845,14 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
             mask = decode_rle(rle, height, width)
             frame_masks[fn].append((mask, color))
 
-        # Load per-frame importance (row-normalized column averages) if available
+        # Load per-frame importance from activation_proj JSON file
         importance_arr = None
-        try:
-            colavg_norm_npz = os.path.join(attn_maps_dir, f"video_{video_id}_refiner_{refiner_id}_rollout_rownorm_colavg_norm.npz")
-            if os.path.exists(colavg_norm_npz):
-                data = np.load(colavg_norm_npz)
-                # Key name per temporal_rollout.py
-                if 'rollout_rownorm_colavg_norm' in data:
-                    importance_arr = data['rollout_rownorm_colavg_norm']
-        except Exception:
-            importance_arr = None
+        if refiner_id is not None:
+            importance_arr = load_activation_proj_weights(inference_dir, video_id)
+            if importance_arr is not None:
+                print(f"  Loaded activation_proj importance array: {len(importance_arr)} values")
+            else:
+                print(f"  Warning: Could not load activation_proj weights for video {video_id}")
 
         # Load attention images if using decoder attention plots
         attention_frame_map = {}
@@ -715,8 +881,17 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
             # Use attention image if available, otherwise use original frame
             if use_attention_images and (frame_idx - 1) in attention_frame_map:
                 img_path = attention_frame_map[frame_idx - 1]
+                # Extract frame number from PNG filename (1-based)
+                png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx)
+                if png_frame_num is not None:
+                    display_frame_num = png_frame_num + 1  # Convert to 1-based
+                else:
+                    # Fallback to frame_idx if extraction fails
+                    display_frame_num = frame_idx
             else:
                 img_path = os.path.join(image_root, fn)
+                # Use frame_idx for original frames
+                display_frame_num = frame_idx
             
             frame = cv2.imread(img_path)
             if frame is None:
@@ -732,7 +907,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
                 imp_val = float(importance_arr[frame_idx - 1])
 
             # Draw frame number, refiner ID, and importance in bottom right corner
-            draw_frame_refiner_and_importance(frame, frame_idx, total_frames, refiner_id, imp_val)
+            # Use frame number from PNG filename (or frame_idx) instead of loop index
+            draw_frame_refiner_and_importance(frame, display_frame_num, total_frames, refiner_id, imp_val)
 
             # Draw original name (folder_name) in top right corner, small font
             draw_small_top_right_label(frame, folder_name)
@@ -804,7 +980,26 @@ if __name__ == "__main__":
         default=None,
         help="Path to val.json file to use for finding original images. If not provided, will search automatically."
     )
+    parser.add_argument(
+        "--colour-scale",
+        type=str,
+        default=None,
+        choices=["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"],
+        help="Colour scale type to use for decoder attention images. If not provided, "
+             "processes all available colour scale types found in decoder_attention_plots directory."
+    )
+    parser.add_argument(
+        "--reorder",
+        action="store_true",
+        help="If set, reorder frames according to max-to-min ordering of attention vector. "
+             "Video names will have '_reordered' suffix."
+    )
     
     args = parser.parse_args()
     
-    visualize_predictions_from_attention_dir(args.attention_dir, val_json_path=args.val_json)
+    visualize_predictions_from_attention_dir(
+        args.attention_dir, 
+        val_json_path=args.val_json,
+        colour_scale=args.colour_scale,
+        reorder=args.reorder
+    )
