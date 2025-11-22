@@ -338,6 +338,28 @@ def overlay_attention_heatmap(image: np.ndarray, attention_2d: np.ndarray,
     return overlaid
 
 
+def find_val_json(base_dir: str) -> Optional[str]:
+    """
+    Find the val JSON file in the base directory by looking for files with 'val' in the name.
+    
+    Args:
+        base_dir: Base directory to search
+        
+    Returns:
+        Path to the val JSON file, or None if not found
+    """
+    base_path = Path(base_dir)
+    
+    # Look for JSON files with 'val' in the name
+    json_files = list(base_path.glob("*.json"))
+    
+    for json_file in json_files:
+        if 'val' in json_file.name.lower():
+            return str(json_file)
+    
+    return None
+
+
 def find_val_json_in_model_dir(directory):
     """
     Find the val.json file in the model directory.
@@ -498,9 +520,13 @@ def load_video_frames(directory: str, video_id: int, frame_start: int, frame_end
     frames = []
     
     try:
-        # Find val.json in model directory if not provided
+        # Find val.json if not provided
         if val_json_path is None:
-            val_json_path = find_val_json_in_model_dir(directory)
+            # First try to find val JSON in the base directory
+            val_json_path = find_val_json(directory)
+            if val_json_path is None:
+                # Fall back to searching in model directory (up the directory tree)
+                val_json_path = find_val_json_in_model_dir(directory)
         
         # Get video info from val.json
         video_info = get_video_info_from_val_json(val_json_path, video_id)
@@ -1050,8 +1076,14 @@ def main():
             val_json_path = args.val_json
             print(f"Using provided validation JSON: {val_json_path}")
         else:
-            val_json_path = find_val_json_in_model_dir(directory)
-            print(f"Found validation JSON: {val_json_path}")
+            # First try to find val JSON in the base directory
+            val_json_path = find_val_json(directory)
+            if val_json_path:
+                print(f"Found validation JSON in base directory: {val_json_path}")
+            else:
+                # Fall back to searching in model directory (up the directory tree)
+                val_json_path = find_val_json_in_model_dir(directory)
+                print(f"Found validation JSON in model directory: {val_json_path}")
         with open(val_json_path, 'r') as f:
             val_data = json.load(f)
         video_info_dict = {v['id']: v for v in val_data['videos']}
