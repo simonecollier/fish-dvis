@@ -348,6 +348,16 @@ def plot_tracker_attention(run_dir, output_json_path=None, create_plots=False):
                 try:
                     # Load tracker meta to find tracker_id
                     meta = load_tracker_meta(run_dir, video_id, frame)
+                    
+                    # Skip frames where tracker_id_to_seq_id is None (e.g., frame 0)
+                    if meta.get("tracker_id_to_seq_id") is None:
+                        # Only print message for frame 0, skip silently for others
+                        if frame == 0:
+                            continue  # Skip frame 0 silently
+                        else:
+                            print(f"Warning: tracker_id_to_seq_id is null for video {video_id}, frame {frame}, skipping")
+                            continue
+                    
                     tracker_id = find_tracker_id_from_sequence_id(meta, sequence_id)
                     
                     if tracker_id is None:
@@ -361,9 +371,11 @@ def plot_tracker_attention(run_dir, output_json_path=None, create_plots=False):
                         video_results[frame] = frame_data
                         
                 except ValueError as e:
-                    # Handle frame 0 case where tracker_id_to_seq_id is null
+                    # Handle other ValueError cases
                     if "tracker_id_to_seq_id is null" in str(e):
-                        print(f"Frame {frame}: tracker_id_to_seq_id is null, skipping")
+                        # This shouldn't happen now since we check above, but keep for safety
+                        if frame != 0:  # Only print if not frame 0
+                            print(f"Frame {frame}: tracker_id_to_seq_id is null, skipping")
                     else:
                         print(f"Error processing frame {frame}: {e}")
                     continue
