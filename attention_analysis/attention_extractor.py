@@ -82,36 +82,11 @@ class RefinerAttentionHook:
                 except (ValueError, IndexError):
                     pass
             
-            # For refiner attention, check if frame_idx is a list (all frames)
-            # The refiner processes all frames at once, not per window
-            # So if frame_idx is a list, use the full range from the list
-            if isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
-                # Use the full frame range from the list
-                actual_frame_start = min(frame_idx)
-                actual_frame_end = max(frame_idx)
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_frames{actual_frame_start}-{actual_frame_end}_refiner_temporal_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_frames{actual_frame_start}-{actual_frame_end}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
-            elif frame_start is not None and frame_end is not None:
-                # Fall back to window-level frame range if frame_idx is not a list
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_refiner_temporal_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_frames{frame_start}-{frame_end}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
-            elif frame_idx is not None:
-                # Single frame index
-                if isinstance(frame_idx, (list, tuple)) and len(frame_idx) > 0:
-                    frame_idx = frame_idx[0]
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_frame_{frame_idx}_refiner_temporal_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_frame_{frame_idx}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+            # Simple filename with just video_id and layer index
+            if layer_idx is not None:
+                filename = f"video_{video_id}_refiner_temporal_layer_{layer_idx}_attn"
             else:
-                if layer_idx is not None:
-                    filename = f"video_{video_id}_unknown_refiner_temporal_layer_{layer_idx}_attn"
-                else:
-                    filename = f"video_{video_id}_unknown_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
+                filename = f"video_{video_id}_refiner_temporal_{self.layer_name.replace('.', '_')}_attn"
             
             # Add video context to entry
             entry['video_id'] = video_id
@@ -484,6 +459,7 @@ class AttentionExtractor:
         self.refiner_attention_maps = []  # global sink for refiner temporal attention maps
         self.predictor_attention_maps = []  # global sink for predictor cross-attention maps
         self.tracker_attention_maps = []  # global sink for tracker attention maps
+        self.activation_proj_weights = []  # Store activation_proj weights (frame importance)
         self._current_predictor_info = None  # Store predictor forward info (size_list, num_feature_levels)
         self._refiner_id_to_seq_id_maps = {}  # Store refiner_id -> sequence_id mapping: {video_id: {window_key: [seq_id_0, seq_id_1, ...]}}
         self.video_attention_data = {}  # video_id -> attention_data
@@ -507,6 +483,9 @@ class AttentionExtractor:
         
         # Register hooks for refiner attention layers and predictor cross-attention
         self._register_hooks()
+        
+        # Register hook for activation_proj weights extraction
+        self._register_activation_proj_hook()
         
         # Register a pre-forward hook on the model to set video context before forward pass
         self._model_forward_hook = self.model.register_forward_pre_hook(self._model_forward_pre_hook)
@@ -844,6 +823,138 @@ class AttentionExtractor:
             import logging
             logging.getLogger(__name__).debug(f"Could not store refiner_id mapping: {e}")
     
+    
+    def _register_activation_proj_hook(self):
+        """Register hook to capture activation_proj weights (frame importance) from refiner."""
+        try:
+            if not hasattr(self.model, 'refiner'):
+                print("[ACTIVATION_PROJ] Warning: Model does not have refiner, skipping activation_proj extraction")
+                return
+            
+            refiner = self.model.refiner
+            if not hasattr(refiner, 'pred_class'):
+                print("[ACTIVATION_PROJ] Warning: Refiner does not have pred_class method, skipping activation_proj extraction")
+                return
+            
+            # Wrap the pred_class method to capture activation weights
+            original_pred_class = refiner.pred_class
+            extractor_instance = self  # Capture extractor instance for closure
+            
+            def wrapped_pred_class(decoder_output, padding_masks):
+                """Wrapped pred_class that captures activation weights."""
+                T = decoder_output.size(2)
+                
+                # Compute activation weights (this is what we want to capture)
+                activation = refiner.activation_proj(decoder_output).softmax(dim=2)  # (l, b, t, q, 1)
+                
+                # Save activation weights using the extractor instance
+                extractor_instance._save_activation_proj_weights(activation, decoder_output)
+                
+                # Continue with original computation
+                class_output = (decoder_output * activation).sum(dim=2, keepdim=True)  # (l, b, 1, q, c)
+                class_output = class_output.repeat(1, 1, T, 1, 1)
+                outputs_class = refiner.class_embed(class_output).transpose(2, 3)
+                return outputs_class
+            
+            # Replace the method
+            refiner.pred_class = wrapped_pred_class
+            self._activation_proj_hook = (refiner, original_pred_class)
+            print("[ACTIVATION_PROJ] Successfully registered activation_proj extraction hook")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to register activation_proj hook: {e}")
+            print(f"[ACTIVATION_PROJ] Error registering hook: {e}")
+    
+    def _save_activation_proj_weights(self, activation, decoder_output):
+        """Save activation_proj weights (frame importance) to disk."""
+        try:
+            import os
+            import numpy as np
+            
+            # Get video context
+            video_context = self._current_video_context
+            if video_context is None:
+                return
+            
+            video_id = video_context.get('video_id', 'unknown')
+            frame_start = video_context.get('frame_start', None)
+            frame_end = video_context.get('frame_end', None)
+            frame_idx = video_context.get('frame_idx', None)
+            window_idx = video_context.get('window_idx', None)
+            
+            # Convert to numpy
+            # activation shape: (l, b, t, q, 1) where l=layers, b=batch, t=frames, q=queries
+            activation_np = activation.detach().cpu().numpy()
+            decoder_output_np = decoder_output.detach().cpu().numpy()
+            
+            # Get dimensions
+            num_layers, batch_size, num_frames, num_queries, _ = activation_np.shape
+            
+            # Build filename
+            attn_dir = os.path.join(self._output_dir, "attention_maps")
+            os.makedirs(attn_dir, exist_ok=True)
+            
+            # Simple filename with just video_id
+            filename = f"video_{video_id}_activation_proj_weights"
+            
+            # Save activation weights and metadata
+            npz_path = os.path.join(attn_dir, f"{filename}.npz")
+            
+            # Save activation weights for each layer
+            # Shape: (l, b, t, q, 1) -> we'll save as (l, t, q) for the last layer (most important)
+            # Also save all layers for analysis
+            save_dict = {
+                'activation_weights': activation_np,  # Full tensor: (l, b, t, q, 1)
+                'decoder_output_shape': decoder_output_np.shape,  # (l, b, t, q, c)
+                'num_layers': num_layers,
+                'batch_size': batch_size,
+                'num_frames': num_frames,
+                'num_queries': num_queries,
+            }
+            
+            # Extract last layer activation (most important for final prediction)
+            # Shape: (b, t, q, 1)
+            last_layer_activation = activation_np[-1, :, :, :, :]
+            save_dict['last_layer_activation'] = last_layer_activation
+            
+            # Average across queries to get per-frame importance: (b, t, 1)
+            per_frame_importance = activation_np[-1, :, :, :, 0].mean(axis=2, keepdims=True)
+            save_dict['per_frame_importance'] = per_frame_importance
+            
+            np.savez_compressed(npz_path, **save_dict)
+            
+            # Save metadata
+            import json
+            from detectron2.utils.file_io import PathManager
+            
+            meta = {
+                'source': 'activation_proj',
+                'video_id': video_id,
+                'frame_idx': frame_idx,
+                'frame_start': frame_start,
+                'frame_end': frame_end,
+                'window_idx': window_idx,
+                'shape': activation_np.shape,
+                'num_layers': int(num_layers),
+                'batch_size': int(batch_size),
+                'num_frames': int(num_frames),
+                'num_queries': int(num_queries),
+                'description': 'Frame importance weights from activation_proj. Higher values indicate more important frames for classification.'
+            }
+            
+            meta_path = os.path.join(attn_dir, f"{filename}.meta.json")
+            with PathManager.open(meta_path, "w") as mf:
+                mf.write(json.dumps(meta, indent=2))
+                mf.flush()
+            
+            print(f"[ACTIVATION_PROJ] Saved activation_proj weights to {filename} (shape: {activation_np.shape})", flush=True)
+            
+        except Exception as e:
+            import logging
+            import traceback
+            error_msg = f"Failed to save activation_proj weights: {e}\n{traceback.format_exc()}"
+            logging.getLogger(__name__).warning(error_msg)
+            print(f"[ACTIVATION_PROJ] ERROR: {error_msg}", flush=True)
     
     def _register_hooks(self):
         """Register forward hooks to capture attention maps."""
@@ -1356,6 +1467,10 @@ class AttentionExtractor:
             model, original_method = self._run_window_hook
             model.run_window_inference = original_method
             self._run_window_hook = None
+        if hasattr(self, '_activation_proj_hook') and self._activation_proj_hook is not None:
+            refiner, original_method = self._activation_proj_hook
+            refiner.pred_class = original_method
+            self._activation_proj_hook = None
         self.refiner_hooks.clear()
         self.predictor_hooks.clear()
         self.tracker_hooks.clear()
