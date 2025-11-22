@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Script to summarize scrambled evaluation results across multiple seeds.
-Takes a directory containing seed subdirectories and calculates averages
-of ap50_instance_Aweighted and ap_instance_Aweighted metrics.
+Script to combine CSV files from multiple seed directories and create summary statistics.
+
+For each CSV type, creates a combined CSV with seed_number column.
+For mask_metrics_dataset.csv and mask_metrics_category.csv, also creates summary CSVs
+with mean, standard deviation, and standard error for each metric.
 """
 
-import argparse
 import os
-import csv
-import glob
-import math
+import sys
+import pandas as pd
+import numpy as np
 from pathlib import Path
-import matplotlib.pyplot as plt
-from matplotlib.table import Table
+import argparse
 
 
 def find_seed_directories(base_dir):
@@ -20,9 +20,9 @@ def find_seed_directories(base_dir):
     base_path = Path(base_dir)
     seed_dirs = []
     
-    # Look for directories matching the pattern eval_*_seed*
+    # Look for directories matching the pattern eval_*_seed* (exclude seeds_summary)
     for item in base_path.iterdir():
-        if item.is_dir() and 'seed' in item.name:
+        if item.is_dir() and 'seed' in item.name and item.name != 'seeds_summary':
             seed_dirs.append(item)
     
     # Sort by seed number for consistent output
@@ -31,500 +31,247 @@ def find_seed_directories(base_dir):
     return seed_dirs
 
 
-def read_metrics_from_csv(csv_path):
-    """Read ap50_instance_Aweighted and ap_instance_Aweighted from CSV file"""
-    metrics = {}
-    
-    if not os.path.exists(csv_path):
-        print(f"Warning: CSV file not found: {csv_path}")
+def extract_seed_number(seed_dir_name):
+    """Extract seed number from directory name (e.g., eval_6059_all_frames_seed1 -> 1)"""
+    try:
+        seed_part = seed_dir_name.split('seed')[-1]
+        return int(seed_part)
+    except (ValueError, IndexError):
         return None
-    
-    with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            metric_name = row['metric_name']
-            if metric_name == 'ap50_instance_Aweighted':
-                metrics['ap50_instance_Aweighted'] = float(row['value'])
-            elif metric_name == 'ap_instance_Aweighted':
-                metrics['ap_instance_Aweighted'] = float(row['value'])
-    
-    # Check if both metrics were found
-    if 'ap50_instance_Aweighted' not in metrics or 'ap_instance_Aweighted' not in metrics:
-        print(f"Warning: Missing metrics in {csv_path}")
-        return None
-    
-    return metrics
 
 
-def read_category_metrics_from_csv(csv_path):
-    """Read per-category metrics from mask_metrics_category.csv file"""
-    category_metrics = {}
+def combine_csvs(base_dir, output_dir):
+    """Combine CSV files from all seed directories."""
+    base_path = Path(base_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    if not os.path.exists(csv_path):
-        print(f"Warning: Category CSV file not found: {csv_path}")
-        return None
-    
-    with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            category_name = row['category_name']
-            ap_instance = row['ap_instance_per_cat']
-            ap50_instance = row['ap50_instance_per_cat']
-            
-            # Handle empty values
-            # Note: Category CSV values are percentages (0-100), keep as percentages
-            if ap_instance and ap_instance.strip():
-                category_metrics[category_name] = {
-                    'ap_instance_per_cat': float(ap_instance),
-                    'ap50_instance_per_cat': float(ap50_instance) if ap50_instance and ap50_instance.strip() else None
-                }
-            elif ap50_instance and ap50_instance.strip():
-                category_metrics[category_name] = {
-                    'ap_instance_per_cat': None,
-                    'ap50_instance_per_cat': float(ap50_instance)
-                }
-    
-    if not category_metrics:
-        print(f"Warning: No category metrics found in {csv_path}")
-        return None
-    
-    return category_metrics
-
-
-def save_results_to_csv(csv_path, avg_ap50, sem_ap50, avg_ap, sem_ap, n_seeds, category_summary,
-                        original_ap50=None, original_ap=None, original_category_summary=None):
-    """Save summary results to CSV file"""
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        
-        # Combined table with dataset-level as "ALL" category
-        if original_ap50 is not None:
-            writer.writerow(['Category', 'Metric', 'Original', 'Scrambled Mean', 'Scrambled SEM', 'N'])
-            
-            # Write "ALL" category (dataset-level metrics)
-            writer.writerow(['ALL', 'AP', f'{original_ap:.2f}', f'{avg_ap:.2f}', f'{sem_ap:.2f}', n_seeds])
-            writer.writerow(['ALL', 'AP50', f'{original_ap50:.2f}', f'{avg_ap50:.2f}', f'{sem_ap50:.2f}', n_seeds])
-            
-            # Create a dict for quick lookup of original values
-            original_dict = {cat['category']: cat for cat in original_category_summary} if original_category_summary else {}
-            
-            # Write per-category metrics
-            for cat in category_summary:
-                cat_name = cat['category']
-                orig_cat = original_dict.get(cat_name, {})
-                
-                if cat['ap_instance_per_cat_mean'] is not None:
-                    orig_ap = orig_cat.get('ap_instance_per_cat_mean', 'N/A')
-                    orig_ap_str = f"{orig_ap:.2f}" if isinstance(orig_ap, (int, float)) else str(orig_ap)
-                    writer.writerow([
-                        cat_name,
-                        'AP',
-                        orig_ap_str,
-                        f"{cat['ap_instance_per_cat_mean']:.2f}",
-                        f"{cat['ap_instance_per_cat_sem']:.2f}",
-                        cat['ap_instance_per_cat_n']
-                    ])
-                if cat['ap50_instance_per_cat_mean'] is not None:
-                    orig_ap50 = orig_cat.get('ap50_instance_per_cat_mean', 'N/A')
-                    orig_ap50_str = f"{orig_ap50:.2f}" if isinstance(orig_ap50, (int, float)) else str(orig_ap50)
-                    writer.writerow([
-                        cat_name,
-                        'AP50',
-                        orig_ap50_str,
-                        f"{cat['ap50_instance_per_cat_mean']:.2f}",
-                        f"{cat['ap50_instance_per_cat_sem']:.2f}",
-                        cat['ap50_instance_per_cat_n']
-                    ])
-        else:
-            writer.writerow(['Category', 'Metric', 'Mean', 'SEM', 'N'])
-            # Write "ALL" category (dataset-level metrics)
-            writer.writerow(['ALL', 'AP', f'{avg_ap:.2f}', f'{sem_ap:.2f}', n_seeds])
-            writer.writerow(['ALL', 'AP50', f'{avg_ap50:.2f}', f'{sem_ap50:.2f}', n_seeds])
-            
-            # Write per-category metrics
-            for cat in category_summary:
-                if cat['ap_instance_per_cat_mean'] is not None:
-                    writer.writerow([
-                        cat['category'],
-                        'AP',
-                        f"{cat['ap_instance_per_cat_mean']:.2f}",
-                        f"{cat['ap_instance_per_cat_sem']:.2f}",
-                        cat['ap_instance_per_cat_n']
-                    ])
-                if cat['ap50_instance_per_cat_mean'] is not None:
-                    writer.writerow([
-                        cat['category'],
-                        'AP50',
-                        f"{cat['ap50_instance_per_cat_mean']:.2f}",
-                        f"{cat['ap50_instance_per_cat_sem']:.2f}",
-                        cat['ap50_instance_per_cat_n']
-                    ])
-
-
-def create_summary_table_png(png_path, avg_ap50, sem_ap50, avg_ap, sem_ap, n_seeds, category_summary,
-                             original_ap50=None, original_ap=None, original_category_summary=None):
-    """Create a PNG table visualization of the summary results"""
-    fig, ax = plt.subplots(figsize=(16, 8))
-    ax.axis('tight')
-    ax.axis('off')
-    
-    # Prepare table data - combined table with "ALL" category
-    table_data = []
-    
-    # Header
-    if original_ap50 is not None:
-        table_data.append(['Evaluation Summary', '', '', '', '', '', ''])
-        table_data.append(['Category', 'Original AP', 'Scrambled AP Mean', 'Scrambled AP SEM', 
-                          'Original AP50', 'Scrambled AP50 Mean', 'Scrambled AP50 SEM'])
-        
-        # "ALL" category (dataset-level metrics) - will be bolded
-        table_data.append([
-            'ALL',
-            f'{original_ap:.2f}',
-            f'{avg_ap:.2f}',
-            f'{sem_ap:.2f}',
-            f'{original_ap50:.2f}',
-            f'{avg_ap50:.2f}',
-            f'{sem_ap50:.2f}'
-        ])
-        
-        # Per-category metrics
-        original_dict = {cat['category']: cat for cat in original_category_summary} if original_category_summary else {}
-        
-        for cat in category_summary:
-            cat_name = cat['category']
-            orig_cat = original_dict.get(cat_name, {})
-            
-            orig_ap = orig_cat.get('ap_instance_per_cat_mean', None)
-            orig_ap_str = f"{orig_ap:.2f}" if isinstance(orig_ap, (int, float)) else 'N/A'
-            ap_mean = f"{cat['ap_instance_per_cat_mean']:.2f}" if cat['ap_instance_per_cat_mean'] is not None else 'N/A'
-            ap_sem = f"{cat['ap_instance_per_cat_sem']:.2f}" if cat['ap_instance_per_cat_sem'] is not None else 'N/A'
-            
-            orig_ap50 = orig_cat.get('ap50_instance_per_cat_mean', None)
-            orig_ap50_str = f"{orig_ap50:.2f}" if isinstance(orig_ap50, (int, float)) else 'N/A'
-            ap50_mean = f"{cat['ap50_instance_per_cat_mean']:.2f}" if cat['ap50_instance_per_cat_mean'] is not None else 'N/A'
-            ap50_sem = f"{cat['ap50_instance_per_cat_sem']:.2f}" if cat['ap50_instance_per_cat_sem'] is not None else 'N/A'
-            
-            table_data.append([
-                cat_name,
-                orig_ap_str,
-                ap_mean,
-                ap_sem,
-                orig_ap50_str,
-                ap50_mean,
-                ap50_sem
-            ])
-    else:
-        table_data.append(['Evaluation Summary', '', '', '', ''])
-        table_data.append(['Category', 'AP Mean', 'AP SEM', 'AP50 Mean', 'AP50 SEM'])
-        
-        # "ALL" category (dataset-level metrics) - will be bolded
-        table_data.append([
-            'ALL',
-            f'{avg_ap:.2f}',
-            f'{sem_ap:.2f}',
-            f'{avg_ap50:.2f}',
-            f'{sem_ap50:.2f}'
-        ])
-        
-        # Per-category metrics
-        for cat in category_summary:
-            ap_mean = f"{cat['ap_instance_per_cat_mean']:.2f}" if cat['ap_instance_per_cat_mean'] is not None else 'N/A'
-            ap_sem = f"{cat['ap_instance_per_cat_sem']:.2f}" if cat['ap_instance_per_cat_sem'] is not None else 'N/A'
-            ap50_mean = f"{cat['ap50_instance_per_cat_mean']:.2f}" if cat['ap50_instance_per_cat_mean'] is not None else 'N/A'
-            ap50_sem = f"{cat['ap50_instance_per_cat_sem']:.2f}" if cat['ap50_instance_per_cat_sem'] is not None else 'N/A'
-            
-            table_data.append([
-                cat['category'],
-                ap_mean,
-                ap_sem,
-                ap50_mean,
-                ap50_sem
-            ])
-    
-    # Create table - ensure all rows have the same number of columns
-    if table_data:
-        num_cols = max(len(row) for row in table_data)
-        # Pad all rows to have the same number of columns
-        for i, row in enumerate(table_data):
-            while len(row) < num_cols:
-                row.append('')
-        
-        col_widths = [0.15, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12] if original_category_summary else [0.25, 0.15, 0.15, 0.15, 0.15, 0.05]
-        table = ax.table(cellText=table_data, cellLoc='center', loc='center', 
-                         colWidths=col_widths[:num_cols])
-    else:
-        return
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 2)
-    
-    # Style header rows and "ALL" row
-    for i in range(len(table_data)):
-        row = table_data[i]
-        if len(row) > 0 and row[0] == 'Evaluation Summary':  # Section header
-            for j in range(num_cols):
-                table[(i, j)].set_facecolor('#4472C4')
-                table[(i, j)].set_text_props(weight='bold', color='white')
-        elif len(row) > 0 and row[0] == 'Category':  # Column headers
-            for j in range(len(row)):
-                table[(i, j)].set_facecolor('#D9E1F2')
-                table[(i, j)].set_text_props(weight='bold')
-        elif len(row) > 0 and row[0] == 'ALL':  # "ALL" row - make it bold
-            for j in range(len(row)):
-                table[(i, j)].set_text_props(weight='bold')
-        elif len(row) > 0 and all(cell == '' for cell in row):  # Empty row
-            for j in range(num_cols):
-                table[(i, j)].set_facecolor('#FFFFFF')
-                table[(i, j)].set_height(0.1)
-    
-    plt.title('Scrambled Evaluation Summary', fontsize=16, fontweight='bold', pad=20)
-    plt.tight_layout()
-    plt.savefig(png_path, dpi=150, bbox_inches='tight')
-    plt.close()
-
-
-def extract_checkpoint_number(seed_dir_name):
-    """Extract checkpoint number from seed directory name (e.g., eval_6059_all_frames_seed1 -> 6059)"""
-    import re
-    # Look for pattern like eval_6059 or eval_6059_all_frames
-    match = re.search(r'eval_(\d+)', seed_dir_name)
-    if match:
-        return match.group(1)
-    return None
-
-
-def read_original_checkpoint_metrics(base_dir, checkpoint_num):
-    """Read original checkpoint metrics from checkpoint_evaluations directory"""
-    if checkpoint_num is None:
-        return None, None
-    
-    # Construct checkpoint directory path (e.g., checkpoint_0006059)
-    checkpoint_dir = f"checkpoint_{checkpoint_num:07d}"
-    # base_dir is like .../model_camera_fold4/scrambled, so go up one level to model_camera_fold4
-    checkpoint_eval_dir = os.path.join(os.path.dirname(base_dir), 
-                                      'checkpoint_evaluations', checkpoint_dir)
-    
-    if not os.path.isdir(checkpoint_eval_dir):
-        print(f"Warning: Checkpoint evaluation directory not found: {checkpoint_eval_dir}")
-        return None, None
-    
-    # Read dataset metrics
-    dataset_csv = os.path.join(checkpoint_eval_dir, 'inference', 'mask_metrics_dataset.csv')
-    dataset_metrics = read_metrics_from_csv(dataset_csv)
-    
-    # Read category metrics
-    category_csv = os.path.join(checkpoint_eval_dir, 'inference', 'mask_metrics_category.csv')
-    category_metrics = read_category_metrics_from_csv(category_csv)
-    
-    return dataset_metrics, category_metrics
-
-
-def summarize_scrambles(base_dir):
-    """Main function to summarize scrambled evaluation results"""
-    base_dir = os.path.abspath(base_dir)
-    
-    if not os.path.isdir(base_dir):
-        print(f"Error: Directory not found: {base_dir}")
-        return
+    # CSV file names to process
+    csv_files = [
+        "mask_metrics_dataset.csv",
+        "mask_metrics_category.csv",
+        "mask_metrics_frame.csv",
+        "mask_metrics_video.csv",
+        "mask_metrics.csv"
+    ]
     
     # Find all seed directories
-    seed_dirs = find_seed_directories(base_dir)
+    seed_dirs = find_seed_directories(base_path)
     
-    if not seed_dirs:
-        print(f"Error: No seed directories found in {base_dir}")
-        return
+    print(f"Found {len(seed_dirs)} seed directories")
     
-    print(f"Found {len(seed_dirs)} seed directories in {base_dir}\n")
+    # Process each CSV type
+    for csv_name in csv_files:
+        print(f"\nProcessing {csv_name}...")
+        combined_data = []
+        
+        for seed_dir in seed_dirs:
+            # Extract seed number
+            seed_num = extract_seed_number(seed_dir.name)
+            if seed_num is None:
+                print(f"  Warning: Could not extract seed number from {seed_dir.name}")
+                continue
+            
+            # Find inference directory (directly in seed directory)
+            inference_dir = seed_dir / "inference"
+            if not inference_dir.exists():
+                print(f"  Warning: Could not find inference directory in {seed_dir}")
+                continue
+            
+            csv_path = inference_dir / csv_name
+            if not csv_path.exists():
+                print(f"  Warning: {csv_path} does not exist")
+                continue
+            
+            # Read CSV
+            try:
+                df = pd.read_csv(csv_path)
+                # Add seed_number column
+                df.insert(0, "seed_number", seed_num)
+                combined_data.append(df)
+                print(f"  Added seed {seed_num}: {len(df)} rows")
+            except Exception as e:
+                print(f"  Error reading {csv_path}: {e}")
+                continue
+        
+        if combined_data:
+            # Combine all dataframes
+            combined_df = pd.concat(combined_data, ignore_index=True)
+            
+            # Save combined CSV
+            output_filename = csv_name.replace(".csv", "_combined.csv")
+            output_file = output_path / output_filename
+            combined_df.to_csv(output_file, index=False)
+            print(f"  Saved combined CSV: {output_file} ({len(combined_df)} rows)")
+        else:
+            print(f"  No data found for {csv_name}")
+
+
+def create_summary_stats(base_dir, output_dir):
+    """Create summary statistics for dataset and category CSVs."""
+    base_path = Path(base_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    # Extract checkpoint number from first seed directory
-    checkpoint_num = None
-    if seed_dirs:
-        checkpoint_num_str = extract_checkpoint_number(seed_dirs[0].name)
-        if checkpoint_num_str:
-            checkpoint_num = int(checkpoint_num_str)
-            print(f"Detected checkpoint number: {checkpoint_num}\n")
+    # Find all seed directories
+    seed_dirs = find_seed_directories(base_path)
     
-    # Read original checkpoint metrics
-    original_dataset_metrics, original_category_metrics = read_original_checkpoint_metrics(base_dir, checkpoint_num)
-    
-    # Collect metrics from each seed directory
-    all_ap50_values = []
-    all_ap_values = []
-    successful_seeds = []
-    
-    # Dictionary to store per-category metrics: {category_name: {'ap': [values], 'ap50': [values]}}
-    category_data = {}
+    # Process mask_metrics_dataset.csv
+    print("\nCreating summary for mask_metrics_dataset.csv...")
+    dataset_data = []
     
     for seed_dir in seed_dirs:
-        csv_path = os.path.join(seed_dir, 'inference', 'mask_metrics_dataset.csv')
-        metrics = read_metrics_from_csv(csv_path)
+        seed_num = extract_seed_number(seed_dir.name)
+        if seed_num is None:
+            continue
         
-        if metrics is not None:
-            all_ap50_values.append(metrics['ap50_instance_Aweighted'])
-            all_ap_values.append(metrics['ap_instance_Aweighted'])
-            successful_seeds.append(seed_dir.name)
-            print(f"{seed_dir.name}:")
-            print(f"  ap50_instance_Aweighted: {metrics['ap50_instance_Aweighted'] * 100.0:.2f}")
-            print(f"  ap_instance_Aweighted: {metrics['ap_instance_Aweighted'] * 100.0:.2f}")
-            
-            # Read category metrics
-            category_csv_path = os.path.join(seed_dir, 'inference', 'mask_metrics_category.csv')
-            cat_metrics = read_category_metrics_from_csv(category_csv_path)
-            
-            if cat_metrics is not None:
-                for category_name, values in cat_metrics.items():
-                    if category_name not in category_data:
-                        category_data[category_name] = {'ap': [], 'ap50': []}
-                    
-                    if values['ap_instance_per_cat'] is not None:
-                        category_data[category_name]['ap'].append(values['ap_instance_per_cat'])
-                    if values['ap50_instance_per_cat'] is not None:
-                        category_data[category_name]['ap50'].append(values['ap50_instance_per_cat'])
-        else:
-            print(f"{seed_dir.name}: Failed to read metrics")
+        inference_dir = seed_dir / "inference"
+        if not inference_dir.exists():
+            continue
+        
+        csv_path = inference_dir / "mask_metrics_dataset.csv"
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path)
+                # Transpose to have metrics as columns
+                df_dict = dict(zip(df['metric_name'], df['value']))
+                df_dict['seed_number'] = seed_num
+                dataset_data.append(df_dict)
+            except Exception as e:
+                print(f"  Error reading {csv_path}: {e}")
+                continue
     
-    if not all_ap50_values:
-        print("\nError: No valid metrics found in any seed directory")
-        return
+    if dataset_data:
+        dataset_df = pd.DataFrame(dataset_data)
+        # Get numeric columns (exclude seed_number)
+        numeric_cols = [col for col in dataset_df.columns if col != 'seed_number']
+        
+        # Calculate statistics
+        summary_data = []
+        for col in numeric_cols:
+            values = dataset_df[col].values
+            # Filter out any invalid values (like -1.0 or NaN)
+            valid_values = values[~np.isnan(values)]
+            if len(valid_values) > 0:
+                mean_val = np.mean(valid_values)
+                std_val = np.std(valid_values, ddof=1)  # Sample standard deviation
+                se_val = std_val / np.sqrt(len(valid_values))  # Standard error
+                
+                summary_data.append({
+                    'metric_name': col,
+                    'mean': mean_val,
+                    'sd': std_val,
+                    'se': se_val,
+                    'n_seeds': len(valid_values)
+                })
+        
+        summary_df = pd.DataFrame(summary_data)
+        output_file = output_path / "mask_metrics_dataset_summary.csv"
+        summary_df.to_csv(output_file, index=False)
+        print(f"  Saved summary CSV: {output_file}")
     
-    # Calculate averages
-    n = len(all_ap50_values)
-    avg_ap50 = sum(all_ap50_values) / n
-    avg_ap = sum(all_ap_values) / n
+    # Process mask_metrics_category.csv
+    print("\nCreating summary for mask_metrics_category.csv...")
+    category_data = []
     
-    # Calculate standard deviations
-    def std_dev(values, mean):
-        """Calculate sample standard deviation"""
-        if len(values) <= 1:
-            return 0.0
-        variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
-        return math.sqrt(variance)
+    for seed_dir in seed_dirs:
+        seed_num = extract_seed_number(seed_dir.name)
+        if seed_num is None:
+            continue
+        
+        inference_dir = seed_dir / "inference"
+        if not inference_dir.exists():
+            continue
+        
+        csv_path = inference_dir / "mask_metrics_category.csv"
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path)
+                df['seed_number'] = seed_num
+                category_data.append(df)
+            except Exception as e:
+                print(f"  Error reading {csv_path}: {e}")
+                continue
     
-    std_ap50 = std_dev(all_ap50_values, avg_ap50)
-    std_ap = std_dev(all_ap_values, avg_ap)
-    
-    # Calculate standard error of the mean
-    sem_ap50 = std_ap50 / math.sqrt(n)
-    sem_ap = std_ap / math.sqrt(n)
-    
-    # Convert dataset-level metrics from decimals (0-1) to percentages (0-100)
-    avg_ap50_pct = avg_ap50 * 100.0
-    avg_ap_pct = avg_ap * 100.0
-    sem_ap50_pct = sem_ap50 * 100.0
-    sem_ap_pct = sem_ap * 100.0
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-    print(f"Number of seeds processed: {len(successful_seeds)}")
-    print(f"\nAverage ap50_instance_Aweighted: {avg_ap50_pct:.2f} ± {sem_ap50_pct:.2f}")
-    print(f"Average ap_instance_Aweighted: {avg_ap_pct:.2f} ± {sem_ap_pct:.2f}")
-    
-    # Calculate and print per-category metrics
-    category_summary = []
     if category_data:
-        print("\nPer-Category Metrics:")
-        print("-" * 60)
+        category_df = pd.concat(category_data, ignore_index=True)
         
-        # Sort categories by name for consistent output
-        sorted_categories = sorted(category_data.keys())
+        # Group by category_id and category_name, then calculate statistics
+        # Get numeric columns (exclude category_id, category_name, seed_number, and any text columns)
+        exclude_cols = ['category_id', 'category_name', 'seed_number']
+        numeric_cols = [col for col in category_df.columns 
+                       if col not in exclude_cols and 
+                       pd.api.types.is_numeric_dtype(category_df[col])]
         
-        for category_name in sorted_categories:
-            cat_ap_values = category_data[category_name]['ap']
-            cat_ap50_values = category_data[category_name]['ap50']
+        summary_rows = []
+        for (cat_id, cat_name), group in category_df.groupby(['category_id', 'category_name']):
+            row = {
+                'category_id': cat_id,
+                'category_name': cat_name
+            }
             
-            cat_summary = {'category': category_name}
+            for col in numeric_cols:
+                values = group[col].values
+                # Filter out invalid values (NaN, -1.0, empty strings)
+                valid_values = values[~np.isnan(values)]
+                if len(valid_values) > 0:
+                    mean_val = np.mean(valid_values)
+                    std_val = np.std(valid_values, ddof=1)
+                    se_val = std_val / np.sqrt(len(valid_values))
+                    
+                    row[f'{col}_mean'] = mean_val
+                    row[f'{col}_sd'] = std_val
+                    row[f'{col}_se'] = se_val
+                    row[f'{col}_n_seeds'] = len(valid_values)
+                else:
+                    row[f'{col}_mean'] = np.nan
+                    row[f'{col}_sd'] = np.nan
+                    row[f'{col}_se'] = np.nan
+                    row[f'{col}_n_seeds'] = 0
             
-            if cat_ap_values:
-                n_cat = len(cat_ap_values)
-                avg_cat_ap = sum(cat_ap_values) / n_cat
-                std_cat_ap = std_dev(cat_ap_values, avg_cat_ap)
-                sem_cat_ap = std_cat_ap / math.sqrt(n_cat) if n_cat > 1 else 0.0
-                print(f"{category_name}:")
-                print(f"  ap_instance_per_cat: {avg_cat_ap:.2f} ± {sem_cat_ap:.2f} (n={n_cat})")
-                cat_summary['ap_instance_per_cat_mean'] = avg_cat_ap
-                cat_summary['ap_instance_per_cat_sem'] = sem_cat_ap
-                cat_summary['ap_instance_per_cat_n'] = n_cat
-            else:
-                cat_summary['ap_instance_per_cat_mean'] = None
-                cat_summary['ap_instance_per_cat_sem'] = None
-                cat_summary['ap_instance_per_cat_n'] = 0
-            
-            if cat_ap50_values:
-                n_cat50 = len(cat_ap50_values)
-                avg_cat_ap50 = sum(cat_ap50_values) / n_cat50
-                std_cat_ap50 = std_dev(cat_ap50_values, avg_cat_ap50)
-                sem_cat_ap50 = std_cat_ap50 / math.sqrt(n_cat50) if n_cat50 > 1 else 0.0
-                if not cat_ap_values:  # Only print category name if we didn't print it above
-                    print(f"{category_name}:")
-                print(f"  ap50_instance_per_cat: {avg_cat_ap50:.2f} ± {sem_cat_ap50:.2f} (n={n_cat50})")
-                cat_summary['ap50_instance_per_cat_mean'] = avg_cat_ap50
-                cat_summary['ap50_instance_per_cat_sem'] = sem_cat_ap50
-                cat_summary['ap50_instance_per_cat_n'] = n_cat50
-            else:
-                cat_summary['ap50_instance_per_cat_mean'] = None
-                cat_summary['ap50_instance_per_cat_sem'] = None
-                cat_summary['ap50_instance_per_cat_n'] = 0
-            
-            category_summary.append(cat_summary)
-    
-    print("="*60)
-    
-    # Prepare original metrics for comparison
-    original_ap50_pct = None
-    original_ap_pct = None
-    original_category_summary = []
-    
-    if original_dataset_metrics:
-        original_ap50_pct = original_dataset_metrics['ap50_instance_Aweighted'] * 100.0
-        original_ap_pct = original_dataset_metrics['ap_instance_Aweighted'] * 100.0
-        print(f"\nOriginal checkpoint metrics:")
-        print(f"  ap50_instance_Aweighted: {original_ap50_pct:.2f}")
-        print(f"  ap_instance_Aweighted: {original_ap_pct:.2f}")
-    
-    if original_category_metrics:
-        sorted_original_cats = sorted(original_category_metrics.keys())
-        for cat_name in sorted_original_cats:
-            cat_data = original_category_metrics[cat_name]
-            original_category_summary.append({
-                'category': cat_name,
-                'ap_instance_per_cat_mean': cat_data['ap_instance_per_cat'],
-                'ap_instance_per_cat_sem': None,  # Original has no SEM
-                'ap50_instance_per_cat_mean': cat_data['ap50_instance_per_cat'],
-                'ap50_instance_per_cat_sem': None  # Original has no SEM
-            })
-    
-    # Save results to CSV
-    csv_path = os.path.join(base_dir, 'scrambled_summary.csv')
-    save_results_to_csv(csv_path, avg_ap50_pct, sem_ap50_pct, avg_ap_pct, sem_ap_pct, 
-                       len(successful_seeds), category_summary,
-                       original_ap50_pct, original_ap_pct, original_category_summary)
-    print(f"\nResults saved to: {csv_path}")
-    
-    # Create and save PNG table
-    png_path = os.path.join(base_dir, 'scrambled_summary.png')
-    create_summary_table_png(png_path, avg_ap50_pct, sem_ap50_pct, avg_ap_pct, sem_ap_pct,
-                            len(successful_seeds), category_summary,
-                            original_ap50_pct, original_ap_pct, original_category_summary)
-    print(f"Table saved to: {png_path}")
+            summary_rows.append(row)
+        
+        summary_df = pd.DataFrame(summary_rows)
+        output_file = output_path / "mask_metrics_category_summary.csv"
+        summary_df.to_csv(output_file, index=False)
+        print(f"  Saved summary CSV: {output_file}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Summarize scrambled evaluation results across multiple seeds'
+        description='Combine CSV files from multiple seed directories and create summary statistics'
     )
     parser.add_argument(
         'directory',
         type=str,
-        help='Base directory containing seed subdirectories (e.g., /path/to/scrambled)'
+        help='Base directory containing seed subdirectories (e.g., /path/to/scrambled_fold4)'
     )
     
     args = parser.parse_args()
-    summarize_scrambles(args.directory)
+    base_dir = os.path.abspath(args.directory)
+    
+    # Create output directory in the same directory
+    output_dir = os.path.join(base_dir, "seeds_summary")
+    
+    print("=" * 60)
+    print(f"Processing directory: {base_dir}")
+    print(f"Output directory: {output_dir}")
+    print("=" * 60)
+    
+    print("\n" + "=" * 60)
+    print("Combining CSV files from all seeds")
+    print("=" * 60)
+    combine_csvs(base_dir, output_dir)
+    
+    print("\n" + "=" * 60)
+    print("Creating summary statistics")
+    print("=" * 60)
+    create_summary_stats(base_dir, output_dir)
+    
+    print("\n" + "=" * 60)
+    print("Done!")
+    print("=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
