@@ -171,6 +171,28 @@ def draw_small_top_right_label(frame, text):
     cv2.rectangle(frame, (x - 4, y - text_height - 4), (x + text_width + 4, y + 4), bg_color, -1)
     cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
 
+def find_val_json(base_dir: str) -> Optional[str]:
+    """
+    Find the val JSON file in the base directory by looking for files with 'val' in the name.
+    
+    Args:
+        base_dir: Base directory to search
+        
+    Returns:
+        Path to the val JSON file, or None if not found
+    """
+    base_path = Path(base_dir)
+    
+    # Look for JSON files with 'val' in the name
+    json_files = list(base_path.glob("*.json"))
+    
+    for json_file in json_files:
+        if 'val' in json_file.name.lower():
+            return str(json_file)
+    
+    return None
+
+
 def find_val_json_in_model_dir(directory):
     """
     Find the val.json file in the model directory.
@@ -490,8 +512,14 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
             valid_json = val_json_path
             print(f"Using provided validation JSON: {valid_json}")
         else:
-            valid_json = find_val_json_in_model_dir(attention_dir)
-            print(f"Found validation JSON: {valid_json}")
+            # First try to find val JSON in the base directory
+            valid_json = find_val_json(attention_dir)
+            if valid_json:
+                print(f"Found validation JSON in base directory: {valid_json}")
+            else:
+                # Fall back to searching in model directory (up the directory tree)
+                valid_json = find_val_json_in_model_dir(attention_dir)
+                print(f"Found validation JSON in model directory: {valid_json}")
     except FileNotFoundError as e:
         raise FileNotFoundError(f"Could not find val.json. {e}")
     
