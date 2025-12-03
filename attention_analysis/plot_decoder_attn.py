@@ -446,14 +446,146 @@ def overlay_attention_grid_heatmap(image: np.ndarray, attention_2d: np.ndarray,
     return overlaid
 
 
-def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
-                              H_feat: int, W_feat: int, feature_stride: int,
-                              attn_min: Optional[float] = None, attn_max: Optional[float] = None,
-                              threshold: float = 0.01) -> np.ndarray:
+def add_text_labels_to_resized_image(image: np.ndarray, attention_2d: np.ndarray,
+                                      H_feat: int, W_feat: int, feature_stride: int,
+                                      original_img_height: int, original_img_width: int,
+                                      attn_min: Optional[float] = None, attn_max: Optional[float] = None,
+                                      threshold: Optional[float] = None) -> np.ndarray:
     """
-    Overlay attention as grid of patches with red square outlines.
-    Line thickness corresponds to attention value (1-5 pixels).
-    Patches with attention below threshold are not drawn.
+    Add text labels with attention values to an already-resized image.
+    This ensures text is drawn at the final resolution for maximum clarity.
+    
+    Args:
+        image: Resized image as numpy array (H, W, 3) in RGB format
+        attention_2d: 2D attention map (H, W) - should match image dimensions
+        H_feat, W_feat: Feature map dimensions (patch grid size)
+        feature_stride: Original downsampling factor (pixels per patch) at original resolution
+        original_img_height: Original image height before resizing
+        original_img_width: Original image width before resizing
+        attn_min: Optional minimum value for normalization
+        attn_max: Optional maximum value for normalization
+        threshold: Minimum normalized attention value to draw patch
+    
+    Returns:
+        Image with text labels added
+    """
+    # Normalize attention to [0, 1] for text labels
+    if attn_min is None:
+        attn_min = attention_2d.min()
+    if attn_max is None:
+        attn_max = attention_2d.max()
+    
+    attn_norm = (attention_2d - attn_min) / (attn_max - attn_min + 1e-8)
+    
+    # Get resized image dimensions
+    img_height, img_width = image.shape[:2]
+    
+    # Calculate scale factors
+    scale_h = img_height / original_img_height
+    scale_w = img_width / original_img_width
+    
+    # Convert original feature_stride to int (same as used in overlay_attention_grid_heatmap)
+    original_feature_stride_int = int(round(feature_stride))
+    
+    # Convert to BGR for cv2.putText
+    overlaid_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    
+    # Calculate font scale based on resized patch size (so text fits nicely inside boxes)
+    resized_stride_h = original_feature_stride_int * scale_h
+    resized_stride_w = original_feature_stride_int * scale_w
+    resized_stride_avg = (resized_stride_h + resized_stride_w) / 2.0
+    font_scale = max(0.15, min(0.5, resized_stride_avg / 100.0))
+    font_thickness = max(1, int(resized_stride_avg / 40))
+    
+    # Draw attention values for each grid position
+    for h in range(H_feat):
+        for w in range(W_feat):
+            # Calculate patch boundaries at ORIGINAL resolution (same as overlay_attention_grid_heatmap)
+            y_start_orig = int(h * original_feature_stride_int)
+            y_end_orig = int(min((h + 1) * original_feature_stride_int, original_img_height))
+            x_start_orig = int(w * original_feature_stride_int)
+            x_end_orig = int(min((w + 1) * original_feature_stride_int, original_img_width))
+            
+            # Scale boundaries to resized image dimensions
+            y_start = int(y_start_orig * scale_h)
+            y_end = int(y_end_orig * scale_h)
+            x_start = int(x_start_orig * scale_w)
+            x_end = int(x_end_orig * scale_w)
+            
+            # Clamp to image boundaries and ensure valid patch
+            y_start = max(0, min(y_start, img_height - 1))
+            y_end = max(y_start + 1, min(y_end, img_height))
+            x_start = max(0, min(x_start, img_width - 1))
+            x_end = max(x_start + 1, min(x_end, img_width))
+            
+            # Sample attention value from the center of the patch region (in resized coordinates)
+            center_y = int((y_start + y_end) // 2)
+            center_x = int((x_start + x_end) // 2)
+            center_y = max(0, min(center_y, img_height - 1))
+            center_x = max(0, min(center_x, img_width - 1))
+            
+            # Get normalized attention value at patch center
+            patch_attn_norm = attn_norm[center_y, center_x]
+            
+            # Skip patches with attention below threshold (if threshold is set)
+            if threshold is not None and patch_attn_norm < threshold:
+                continue
+            
+            # Calculate the text value: multiply by 100 and round to integer (no decimals)
+            text_value_int = int(round(patch_attn_norm * 100))
+            
+            # Skip if value is below 10 (after multiplying by 100)
+            if text_value_int < 10:
+                continue
+            
+            text_value = str(text_value_int)
+            
+            # Get text size to center it properly
+            (text_width, text_height), baseline = cv2.getTextSize(
+                text_value, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness
+            )
+            
+            # Position text at center of patch
+            # cv2.putText uses bottom-left corner (baseline) as anchor, so we need to adjust
+            patch_center_x = (x_start + x_end) // 2
+            patch_center_y = (y_start + y_end) // 2
+            
+            # Center horizontally: subtract half the text width
+            text_x = patch_center_x - text_width // 2
+            
+            # Center vertically: 
+            # The text extends from (y - text_height) to y, where y is the baseline
+            # The actual text height above baseline is (text_height - baseline)
+            # To center: patch_center_y = y - (text_height - baseline)/2 - baseline/2
+            # Simplifying: patch_center_y = y - text_height/2
+            # Therefore: y = patch_center_y + text_height/2
+            text_y = int(patch_center_y + text_height / 2)
+            
+            # Always use white text with black outline for better visibility
+            text_color = (255, 255, 255)  # White text
+            
+            # Draw text with a slight outline for better visibility
+            # Draw outline (black)
+            cv2.putText(overlaid_bgr, text_value, (text_x, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0),
+                       font_thickness + 1, cv2.LINE_AA)
+            # Draw main text (always white)
+            cv2.putText(overlaid_bgr, text_value, (text_x, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color,
+                       font_thickness, cv2.LINE_AA)
+    
+    # Convert back to RGB
+    return cv2.cvtColor(overlaid_bgr, cv2.COLOR_BGR2RGB)
+
+
+def overlay_attention_grid_heatmap_with_numbers(image: np.ndarray, attention_2d: np.ndarray,
+                                                 H_feat: int, W_feat: int, feature_stride: int,
+                                                 attn_min: Optional[float] = None, attn_max: Optional[float] = None,
+                                                 alpha: float = 0.3, colormap: str = 'viridis',
+                                                 threshold: Optional[float] = None, blur_sigma: Optional[float] = None) -> np.ndarray:
+    """
+    Overlay attention as grid of colored patches with Gaussian blur for smooth gradients,
+    and include attention values (multiplied by 100, no decimals) as text labels in each patch.
     
     Args:
         image: Original image as numpy array (H, W, 3) in RGB format
@@ -462,16 +594,54 @@ def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
         feature_stride: Downsampling factor (pixels per patch)
         attn_min: Optional minimum value for normalization (if None, uses attention_2d.min())
         attn_max: Optional maximum value for normalization (if None, uses attention_2d.max())
-        threshold: Minimum normalized attention value to draw patch (default: 0.01)
+        alpha: Transparency factor for heatmap overlay (default: 0.3 for quite transparent)
+        colormap: Matplotlib colormap name (default: 'viridis' - perceptually uniform and colorblind-friendly)
+        threshold: Minimum normalized attention value to draw patch (default: None - draw all patches)
+        blur_sigma: Standard deviation for Gaussian blur (default: None - auto-calculate based on patch size)
     
     Returns:
-        Overlaid image with red square outlines
+        Overlaid image with colored patch grid, smooth gradients, and attention value labels
+    """
+    # Just create the grid heatmap overlay (text will be added after resizing)
+    overlaid = overlay_attention_grid_heatmap(
+        image, attention_2d, H_feat, W_feat, feature_stride,
+        attn_min=attn_min, attn_max=attn_max,
+        alpha=alpha, colormap=colormap,
+        threshold=threshold, blur_sigma=blur_sigma
+    )
+    
+    return overlaid
+
+
+def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
+                              H_feat: int, W_feat: int, feature_stride: int,
+                              attn_min: Optional[float] = None, attn_max: Optional[float] = None,
+                              threshold: float = 0.01) -> np.ndarray:
+    """
+    Overlay attention as grid of colored square patches.
+    Each patch is colored according to normalized attention value:
+    - 1.0 to 0.75: red
+    - 0.75 to 0.5: yellow
+    - 0.5 to 0.25: blue
+    - 0.25 to 0.0: not plotted (no color)
+    No grid lines are drawn.
+    
+    Args:
+        image: Original image as numpy array (H, W, 3) in RGB format
+        attention_2d: 2D attention map (H, W) - can be pre-normalized or raw values
+        H_feat, W_feat: Feature map dimensions (patch grid size)
+        feature_stride: Downsampling factor (pixels per patch)
+        attn_min: Optional minimum value for normalization (if None, uses attention_2d.min())
+        attn_max: Optional maximum value for normalization (if None, uses attention_2d.max())
+        threshold: Minimum normalized attention value to draw patch (default: 0.01, but patches < 0.25 are skipped)
+    
+    Returns:
+        Overlaid image with colored square patches
     """
     # Make a copy of the image to draw on
-    # Convert to BGR for cv2.rectangle (cv2 functions expect BGR)
-    overlaid_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR).copy()
+    overlaid = image.copy()
     
-    # Normalize attention to [0, 1]
+    # Normalize attention to [0, 1] per frame
     if attn_min is None:
         attn_min = attention_2d.min()
     if attn_max is None:
@@ -482,13 +652,24 @@ def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
     # Get image dimensions
     img_height, img_width = image.shape[:2]
     
-    # Red color in BGR format (for cv2.rectangle)
-    red_bgr = (0, 0, 255)  # BGR
+    # Define color ranges (RGB format)
+    # Red: 1.0 to 0.75
+    red = np.array([255, 0, 0], dtype=np.float32)
+    # Yellow: 0.75 to 0.5
+    yellow = np.array([255, 255, 0], dtype=np.float32)
+    # Blue: 0.5 to 0.25
+    blue = np.array([0, 0, 255], dtype=np.float32)
     
-    # Draw squares for each patch with transparency based on attention
+    # Transparency factor (0.0 = fully transparent, 1.0 = fully opaque)
+    alpha = 0.3
+    
     # Convert feature_stride to int to ensure integer coordinates
     feature_stride_int = int(round(feature_stride))
     
+    # Convert image to float32 for blending
+    overlaid_float = overlaid.astype(np.float32)
+    
+    # Draw colored patches for each grid position
     for h in range(H_feat):
         for w in range(W_feat):
             # Calculate patch boundaries in image coordinates
@@ -499,7 +680,6 @@ def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
             x_end = int(min((w + 1) * feature_stride_int, img_width))
             
             # Sample attention value from the center of the patch region
-            # Use the center pixel or average over the patch region
             center_y = int((y_start + y_end) // 2)
             center_x = int((x_start + x_end) // 2)
             center_y = min(center_y, img_height - 1)
@@ -508,46 +688,33 @@ def overlay_attention_squares(image: np.ndarray, attention_2d: np.ndarray,
             # Get normalized attention value at patch center
             patch_attn_norm = attn_norm[center_y, center_x]
             
-            # Skip patches with attention below threshold
-            if patch_attn_norm < threshold:
+            # Skip patches with attention below 0.25 (no color)
+            if patch_attn_norm < 0.25:
                 continue
             
-            # Calculate line thickness: 1-5 pixels based on normalized attention
-            thickness = 1 + int(4 * patch_attn_norm)
-            thickness = max(1, min(5, thickness))  # Clamp to [1, 5]
+            # Determine color based on attention value ranges
+            if patch_attn_norm >= 0.75:
+                # Red: 1.0 to 0.75
+                patch_color = red
+            elif patch_attn_norm >= 0.5:
+                # Yellow: 0.75 to 0.5
+                patch_color = yellow
+            elif patch_attn_norm >= 0.25:
+                # Blue: 0.5 to 0.25
+                patch_color = blue
+            else:
+                # Should not reach here due to check above, but skip just in case
+                continue
             
-            # Calculate alpha (transparency) based on attention value
-            # Scale from threshold to 1.0 for alpha from 0.3 to 1.0
-            # Lower attention = more transparent
-            alpha_value = 0.3 + 0.7 * ((patch_attn_norm - threshold) / (1.0 - threshold + 1e-8))
-            alpha_value = max(0.3, min(1.0, alpha_value))  # Clamp to [0.3, 1.0]
-            
-            # Create temporary overlay for this rectangle only
-            temp_overlay = np.zeros_like(overlaid_bgr)
-            cv2.rectangle(
-                temp_overlay,
-                (int(x_start), int(y_start)),
-                (int(x_end - 1), int(y_end - 1)),  # -1 to avoid overlap with adjacent patches
-                red_bgr,
-                thickness=thickness
-            )
-            
-            # Create mask for where the rectangle was drawn
-            mask = np.any(temp_overlay > 0, axis=2)
-            
-            # Blend only the rectangle area with attention-based alpha
-            overlaid_float = overlaid_bgr.astype(np.float32)
-            temp_overlay_float = temp_overlay.astype(np.float32)
-            
-            overlaid_float[mask] = (
-                overlaid_float[mask] * (1.0 - alpha_value) + 
-                temp_overlay_float[mask] * alpha_value
-            )
-            
-            overlaid_bgr = np.clip(overlaid_float, 0, 255).astype(np.uint8)
+            # Blend the color with the underlying image using transparency
+            # Get the patch region
+            patch_region = overlaid_float[y_start:y_end, x_start:x_end]
+            # Blend: alpha * color + (1 - alpha) * original_image
+            blended_patch = alpha * patch_color + (1 - alpha) * patch_region
+            overlaid_float[y_start:y_end, x_start:x_end] = blended_patch
     
-    # Convert back to RGB for consistency with rest of code
-    overlaid = cv2.cvtColor(overlaid_bgr, cv2.COLOR_BGR2RGB)
+    # Convert back to uint8
+    overlaid = np.clip(overlaid_float, 0, 255).astype(np.uint8)
     
     return overlaid
 
@@ -838,7 +1005,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                             query_choice: str = "top",
                             scale: str = "per_frame",
                             temporal_attention_weights: Optional[np.ndarray] = None,
-                            viz_type: str = "heatmap"):
+                            viz_type: str = "grid_heatmap"):
     """
     Plot attention maps for queries across multiple layers, using per-frame query IDs.
     
@@ -886,7 +1053,7 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
         query_choice: Method used - "top" or "weighted_sum"
         scale: Scaling mode - "per_frame", "across_frames", "temporal_per_frame", or "temporal_across_frames"
         temporal_attention_weights: Optional array of temporal attention weights, shape (num_frames,)
-        viz_type: Visualization type - "heatmap" for colored heatmap overlay with interpolation, "grid" for red square outlines with thickness corresponding to attention, "grid_heatmap" for colored patches without interpolation
+        viz_type: Visualization type - "heatmap" for colored heatmap overlay with interpolation, "grid" for red square outlines with thickness corresponding to attention, "grid_heatmap" for colored patches without interpolation, "heatmap_num" for grid_heatmap with attention values (×100, no decimals) as text labels
     """
     # Plot for each layer
     for layer_idx in layer_indices:
@@ -1164,7 +1331,16 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                     overlaid = overlay_attention_grid_heatmap(
                         frame, attn_2d, H_feat, W_feat, feature_stride,
                         attn_min=attn_min, attn_max=attn_max,
-                        alpha=0.6,  # Less transparent for better visibility
+                        alpha=0.75,  # Less transparent for better visibility
+                        colormap='viridis',  # Perceptually uniform colormap
+                        threshold=None  # Draw all patches, no threshold
+                    )
+                elif viz_type == "heatmap_num":
+                    # Use grid heatmap with attention value numbers
+                    overlaid = overlay_attention_grid_heatmap_with_numbers(
+                        frame, attn_2d, H_feat, W_feat, feature_stride,
+                        attn_min=attn_min, attn_max=attn_max,
+                        alpha=0.75,  # Less transparent for better visibility
                         colormap='viridis',  # Perceptually uniform colormap
                         threshold=None  # Draw all patches, no threshold
                     )
@@ -1182,7 +1358,25 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             # Use output dimensions if provided, otherwise keep original size
             final_height = output_img_height if output_img_height is not None else original_img_height
             final_width = output_img_width if output_img_width is not None else original_img_width
-            if overlaid.shape[:2] != (final_height, final_width):
+            
+            # For heatmap_num, we need to resize attention_2d and add text after resizing
+            if viz_type == "heatmap_num" and attn_2d is not None:
+                # Resize the image first
+                if overlaid.shape[:2] != (final_height, final_width):
+                    overlaid = cv2.resize(overlaid, (final_width, final_height), interpolation=cv2.INTER_LINEAR)
+                
+                # Resize attention map to match output dimensions
+                attn_2d_resized = cv2.resize(attn_2d, (final_width, final_height), interpolation=cv2.INTER_LINEAR)
+                
+                # Add text labels at final resolution
+                # Pass original dimensions so patch boundaries are calculated the same way as when patches were drawn
+                overlaid = add_text_labels_to_resized_image(
+                    overlaid, attn_2d_resized, H_feat, W_feat, feature_stride,
+                    original_img_height, original_img_width,
+                    attn_min=attn_min, attn_max=attn_max, threshold=None
+                )
+            elif overlaid.shape[:2] != (final_height, final_width):
+                # Regular resize for other viz types
                 overlaid = cv2.resize(overlaid, (final_width, final_height), interpolation=cv2.INTER_LINEAR)
             
             # Save plot in layer-specific directory
@@ -1207,6 +1401,83 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             cv2.imwrite(output_path, overlaid_bgr)
     
     print(f"Saved attention plots for video {video_id} to {output_dir}/{scale}/video_{video_id}/")
+    
+    # Save colorbar legend for across_frames scale types (only once per scale/viz_type)
+    if scale in ["across_frames", "temporal_across_frames"]:
+        scale_output_dir = os.path.join(output_dir, scale)
+        legend_filename = f'colorbar_legend_{scale}_{viz_type}.png'
+        legend_path = os.path.join(scale_output_dir, legend_filename)
+        if not os.path.exists(legend_path):
+            save_colorbar_legend(output_dir, scale, viz_type)
+
+
+def save_colorbar_legend(output_dir: str, scale: str, viz_type: str):
+    """
+    Save a colorbar legend image for the attention visualization.
+    
+    Args:
+        output_dir: Base output directory
+        scale: Scaling mode (e.g., "across_frames")
+        viz_type: Visualization type (e.g., "grid_heatmap")
+    """
+    # Determine colormap based on viz_type
+    if viz_type == "grid_heatmap":
+        colormap_name = 'viridis'
+    elif viz_type == "heatmap":
+        colormap_name = 'jet'
+    else:
+        colormap_name = 'viridis'  # Default
+    
+    # Get colormap (with compatibility check)
+    cmap = cm.get_cmap(colormap_name) if hasattr(cm, 'get_cmap') else plt.get_cmap(colormap_name)
+    
+    # Create figure with colorbar
+    fig, ax = plt.subplots(figsize=(3, 8))
+    fig.subplots_adjust(right=0.6)
+    
+    # Create gradient for colorbar (high to low attention)
+    gradient = np.linspace(1, 0, 256).reshape(256, 1)
+    
+    # Display gradient
+    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=[0, 1, 0, 1])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    
+    # Remove axes ticks but keep labels
+    ax.set_xticks([])
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_yticklabels(['1.0\n(High)', '0.75', '0.5', '0.25', '0.0\n(Low)'], fontsize=11)
+    
+    # Add labels
+    ax.set_ylabel('Normalized Attention Value', fontsize=13, fontweight='bold', labelpad=15)
+    
+    # Add title with scale and colormap info
+    title = f'Attention Colorbar Legend\nScale: {scale.replace("_", " ").title()}\nColormap: {colormap_name}'
+    ax.set_title(title, fontsize=11, pad=15, fontweight='bold')
+    
+    # Add note about scale
+    if scale == "across_frames":
+        note = "Values normalized across all frames\n(consistent scale for comparison)"
+    elif scale == "temporal_across_frames":
+        note = "Values scaled by temporal weights,\nthen normalized across all frames"
+    else:
+        note = ""
+    
+    if note:
+        ax.text(0.5, -0.08, note, transform=ax.transAxes, 
+                fontsize=9, ha='center', style='italic', wrap=True)
+    
+    # Save to scale directory
+    scale_output_dir = os.path.join(output_dir, scale)
+    os.makedirs(scale_output_dir, exist_ok=True)
+    
+    legend_filename = f'colorbar_legend_{scale}_{viz_type}.png'
+    legend_path = os.path.join(scale_output_dir, legend_filename)
+    
+    plt.savefig(legend_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='black', linewidth=2)
+    plt.close(fig)
+    
+    print(f"Saved colorbar legend to {legend_path}")
 
 
 def load_image_dimensions_from_eval(directory, video_id):
@@ -1288,9 +1559,9 @@ def main():
     parser.add_argument(
         "--viz-type",
         type=str,
-        choices=["heatmap", "grid", "grid_heatmap"],
-        default="heatmap",
-        help="Visualization type: 'heatmap' overlays attention as colored heatmap with interpolation (default), 'grid' plots patches as red square outlines with thickness corresponding to attention, 'grid_heatmap' plots colored patches without interpolation"
+        choices=["heatmap", "grid", "grid_heatmap", "heatmap_num"],
+        default="grid_heatmap",
+        help="Visualization type: 'heatmap' overlays attention as colored heatmap with interpolation, 'grid' plots patches as red square outlines with thickness corresponding to attention, 'grid_heatmap' plots colored patches with Gaussian blur for smooth gradients (default), 'heatmap_num' same as grid_heatmap but includes attention values (×100, no decimals) as text labels"
     )
     
     args = parser.parse_args()
