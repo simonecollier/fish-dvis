@@ -300,18 +300,21 @@ def load_image_dimensions_from_eval(directory, video_id):
             raise KeyError(f"Video {video_id} not found in image_dimensions.json")
         return dims_dict[video_key]
 
-def extract_frame_number_from_png_filename(filename: str, video_id: int, layer_idx: int) -> Optional[int]:
+def extract_frame_number_from_png_filename(filename: str, video_id: int, layer_idx: int, viz_type: Optional[str] = None) -> Optional[int]:
     """
     Extract frame number from PNG filename.
     
     Supports patterns:
     - video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}.png
+    - video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}_{viz_type}.png
     - video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}.png
+    - video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}_{viz_type}.png
     
     Args:
         filename: PNG filename (with or without path)
         video_id: Video ID
         layer_idx: Layer index
+        viz_type: Optional visualization type (e.g., "heatmap", "grid", "grid_heatmap", "heatmap_num")
     
     Returns:
         Frame number (0-based) if found, None otherwise
@@ -319,29 +322,37 @@ def extract_frame_number_from_png_filename(filename: str, video_id: int, layer_i
     # Extract just the filename if path is provided
     basename = os.path.basename(filename)
     
-    # Try weighted_sum pattern first
-    weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+)\.png')
+    # Build viz_type suffix pattern if provided
+    viz_suffix = rf'_{re.escape(viz_type)}' if viz_type else r'(?:_(?:heatmap|grid|grid_heatmap|heatmap_num))?'
+    
+    # Try weighted_sum pattern first (with optional viz_type suffix)
+    weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
     match = weighted_sum_pattern.match(basename)
     if match:
         return int(match.group(1))
     
-    # Try query pattern
-    query_pattern = re.compile(rf'video_{video_id}_query_\d+_layer_{layer_idx}_frame_(\d+)\.png')
+    # Try query pattern (with optional viz_type suffix)
+    query_pattern = re.compile(rf'video_{video_id}_query_\d+_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
     match = query_pattern.match(basename)
     if match:
         return int(match.group(1))
     
     return None
 
-def find_attention_images(decoder_attention_plots_dir: str, video_id: int, layer_idx: int) -> dict:
+def find_attention_images(decoder_attention_plots_dir: str, video_id: int, layer_idx: int, viz_type: Optional[str] = None, query_choice: Optional[str] = None) -> dict:
     """
     Find all attention images for a specific layer across all queries.
-    Prioritizes weighted_sum images (from plot_decoder_attn.py with query-choice=weighted_sum).
     
     Args:
         decoder_attention_plots_dir: Output directory from plot_decoder_attn.py
         video_id: Video ID
         layer_idx: Layer index to find images for
+        viz_type: Optional visualization type (e.g., "heatmap", "grid", "grid_heatmap", "heatmap_num").
+                  If provided, only matches files with this viz_type suffix.
+        query_choice: Optional query choice filter ("top" or "weighted_sum").
+                      If "weighted_sum", only matches files with "weighted_sum" in name.
+                      If "top", only matches files with "query_*" pattern.
+                      If None, prioritizes weighted_sum but falls back to query_*.
     
     Returns:
         Dictionary mapping frame_idx to image path
@@ -354,36 +365,72 @@ def find_attention_images(decoder_attention_plots_dir: str, video_id: int, layer
     if not os.path.exists(layer_dir):
         return frame_to_image
     
-    # First, try to find weighted_sum images (default from plot_decoder_attn.py)
-    # Pattern: video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}.png
-    weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+)\.png')
+    # Build viz_type suffix pattern if provided
+    if viz_type:
+        viz_suffix = rf'_{re.escape(viz_type)}'
+    else:
+        # If no viz_type specified, match files with or without viz_type suffix
+        viz_suffix = r'(?:_(?:heatmap|grid|grid_heatmap|heatmap_num))?'
     
-    # Search for weighted_sum images first
-    for filename in os.listdir(layer_dir):
-        match = weighted_sum_pattern.match(filename)
-        if match:
-            frame_idx = int(match.group(1))
-            frame_to_image[frame_idx] = os.path.join(layer_dir, filename)
-    
-    # If we found weighted_sum images, return them (they're the default)
-    if frame_to_image:
+    # Determine which pattern to search for based on query_choice
+    if query_choice == "weighted_sum":
+        # Only search for weighted_sum images
+        # Pattern: video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}[_{viz_type}].png
+        weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
+        
+        for filename in os.listdir(layer_dir):
+            match = weighted_sum_pattern.match(filename)
+            if match:
+                frame_idx = int(match.group(1))
+                frame_to_image[frame_idx] = os.path.join(layer_dir, filename)
+        
         return frame_to_image
     
-    # Fallback to query-based pattern if no weighted_sum images found
-    # Pattern: video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}.png
-    query_pattern = re.compile(rf'video_{video_id}_query_(\d+)_layer_{layer_idx}_frame_(\d+)\.png')
+    elif query_choice == "top":
+        # Only search for query_* images
+        # Pattern: video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}[_{viz_type}].png
+        query_pattern = re.compile(rf'video_{video_id}_query_(\d+)_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
+        
+        for filename in os.listdir(layer_dir):
+            match = query_pattern.match(filename)
+            if match:
+                frame_idx = int(match.group(2))
+                # If multiple queries have the same frame, keep the first one found
+                if frame_idx not in frame_to_image:
+                    frame_to_image[frame_idx] = os.path.join(layer_dir, filename)
+        
+        return frame_to_image
     
-    # Search in the layer-specific directory
-    for filename in os.listdir(layer_dir):
-        match = query_pattern.match(filename)
-        if match:
-            frame_idx = int(match.group(2))
-            # If multiple queries have the same frame, keep the first one found
-            # (or we could prefer a specific query, but for now just use first)
-            if frame_idx not in frame_to_image:
+    else:
+        # Default behavior: prioritize weighted_sum, fall back to query_*
+        # Pattern: video_{video_id}_weighted_sum_layer_{layer_idx}_frame_{frame_idx}[_{viz_type}].png
+        weighted_sum_pattern = re.compile(rf'video_{video_id}_weighted_sum_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
+        
+        # Search for weighted_sum images first
+        for filename in os.listdir(layer_dir):
+            match = weighted_sum_pattern.match(filename)
+            if match:
+                frame_idx = int(match.group(1))
                 frame_to_image[frame_idx] = os.path.join(layer_dir, filename)
-    
-    return frame_to_image
+        
+        # If we found weighted_sum images, return them (they're the default)
+        if frame_to_image:
+            return frame_to_image
+        
+        # Fallback to query-based pattern if no weighted_sum images found
+        # Pattern: video_{video_id}_query_{query_id}_layer_{layer_idx}_frame_{frame_idx}[_{viz_type}].png
+        query_pattern = re.compile(rf'video_{video_id}_query_(\d+)_layer_{layer_idx}_frame_(\d+){viz_suffix}\.png')
+        
+        # Search in the layer-specific directory
+        for filename in os.listdir(layer_dir):
+            match = query_pattern.match(filename)
+            if match:
+                frame_idx = int(match.group(2))
+                # If multiple queries have the same frame, keep the first one found
+                if frame_idx not in frame_to_image:
+                    frame_to_image[frame_idx] = os.path.join(layer_dir, filename)
+        
+        return frame_to_image
 
 def find_available_layers(decoder_attention_plots_dir: str, video_id: int) -> list:
     """
@@ -414,30 +461,30 @@ def find_available_layers(decoder_attention_plots_dir: str, video_id: int) -> li
     
     return sorted(layers)
 
-def find_available_colour_scales(decoder_attention_plots_base_dir):
+def find_available_scales(decoder_attention_plots_base_dir):
     """
-    Find available colour scale subdirectories in decoder_attention_plots directory.
+    Find available scale subdirectories in decoder_attention_plots directory.
     
     Args:
-        decoder_attention_plots_base_dir: Base directory containing colour scale subdirectories
+        decoder_attention_plots_base_dir: Base directory containing scale subdirectories
     
     Returns:
-        List of available colour scale names
+        List of available scale names
     """
-    valid_colour_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
+    valid_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
     available_scales = []
     
     if not os.path.exists(decoder_attention_plots_base_dir):
         return available_scales
     
-    for scale in valid_colour_scales:
-        scale_dir = os.path.join(decoder_attention_plots_base_dir, scale)
+    for scale_name in valid_scales:
+        scale_dir = os.path.join(decoder_attention_plots_base_dir, scale_name)
         if os.path.exists(scale_dir) and os.path.isdir(scale_dir):
-            available_scales.append(scale)
+            available_scales.append(scale_name)
     
     return available_scales
 
-def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, colour_scale=None, reorder=False):
+def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, scale=None, reorder=False, viz_type="grid_heatmap", layer=None, query_choice=None):
     """
     Create prediction videos with attention overlays from attention directory.
     
@@ -445,9 +492,12 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, 
         attention_dir: Path to attention extraction directory (e.g., /path/to/eval_attn_6059)
                       Should contain inference/decoder_attention_plots/ subdirectory
         val_json_path: Optional path to val.json file. If not provided, will search automatically.
-        colour_scale: Optional colour scale type ("across_frames", "per_frame", "temporal_across_frames", 
-                     "temporal_per_frame"). If None, processes all available colour scales.
+        scale: Optional scale type ("across_frames", "per_frame", "temporal_across_frames", 
+                     "temporal_per_frame"). If None, processes all available scales.
         reorder: If True, reorder frames according to max-to-min ordering of attention vector.
+        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num") to look for in filenames.
+        layer: Optional layer index to filter by. If provided, only processes videos for this layer.
+        query_choice: Optional query choice ("top" or "weighted_sum") to filter attention images by.
     """
     attention_dir = os.path.abspath(attention_dir)
     
@@ -461,49 +511,52 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, 
     if not os.path.exists(results_json):
         raise FileNotFoundError(f"Results JSON not found: {results_json}")
     
-    # Determine which colour scales to process
-    if colour_scale is not None:
-        valid_colour_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
-        if colour_scale not in valid_colour_scales:
-            raise ValueError(f"Invalid colour_scale: {colour_scale}. Must be one of {valid_colour_scales}")
-        colour_scales_to_process = [colour_scale]
+    # Determine which scales to process
+    if scale is not None:
+        valid_scales = ["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"]
+        if scale not in valid_scales:
+            raise ValueError(f"Invalid scale: {scale}. Must be one of {valid_scales}")
+        scales_to_process = [scale]
     else:
-        # Find all available colour scales
-        colour_scales_to_process = find_available_colour_scales(decoder_attention_plots_base_dir)
-        if not colour_scales_to_process:
-            raise FileNotFoundError(f"No valid colour scale subdirectories found in {decoder_attention_plots_base_dir}")
-        print(f"Found {len(colour_scales_to_process)} colour scale(s) to process: {colour_scales_to_process}")
+        # Find all available scales
+        scales_to_process = find_available_scales(decoder_attention_plots_base_dir)
+        if not scales_to_process:
+            raise FileNotFoundError(f"No valid scale subdirectories found in {decoder_attention_plots_base_dir}")
+        print(f"Found {len(scales_to_process)} scale(s) to process: {scales_to_process}")
     
-    # Process each colour scale
-    for scale in colour_scales_to_process:
+    # Process each scale
+    for scale_name in scales_to_process:
         print(f"\n{'='*80}")
-        print(f"Processing colour scale: {scale}")
+        print(f"Processing scale: {scale_name}")
         print(f"{'='*80}")
-        _visualize_predictions_for_colour_scale(
-            attention_dir, val_json_path, scale, decoder_attention_plots_base_dir, results_json, reorder=reorder
+        _visualize_predictions_for_scale(
+            attention_dir, val_json_path, scale_name, decoder_attention_plots_base_dir, results_json, reorder=reorder, viz_type=viz_type, layer=layer, query_choice=query_choice
         )
 
-def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour_scale, 
-                                           decoder_attention_plots_base_dir, results_json, reorder=False):
+def _visualize_predictions_for_scale(attention_dir, val_json_path, scale, 
+                                           decoder_attention_plots_base_dir, results_json, reorder=False, viz_type="grid_heatmap", layer=None, query_choice=None):
     """
-    Internal function to process videos for a specific colour scale.
+    Internal function to process videos for a specific scale.
     
     Args:
         attention_dir: Path to attention extraction directory
         val_json_path: Optional path to val.json file
-        colour_scale: Colour scale type to process
-        decoder_attention_plots_base_dir: Base directory containing colour scale subdirectories
+        scale: Scale type to process
+        decoder_attention_plots_base_dir: Base directory containing scale subdirectories
         results_json: Path to results_temporal.json
         reorder: If True, reorder frames according to max-to-min ordering of attention vector.
+        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num") to look for in filenames.
+        layer: Optional layer index to filter by. If provided, only processes videos for this layer.
+        query_choice: Optional query choice ("top" or "weighted_sum") to filter attention images by.
     """
     attention_dir = os.path.abspath(attention_dir)
     
     # Auto-detect paths
     inference_dir = os.path.join(attention_dir, "inference")
-    decoder_attention_plots_dir = os.path.join(decoder_attention_plots_base_dir, colour_scale)
+    decoder_attention_plots_dir = os.path.join(decoder_attention_plots_base_dir, scale)
     
     if not os.path.exists(decoder_attention_plots_dir):
-        print(f"Warning: Colour scale directory not found: {decoder_attention_plots_dir}, skipping")
+        print(f"Warning: Scale directory not found: {decoder_attention_plots_dir}, skipping")
         return
     
     # Find val.json
@@ -532,8 +585,11 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
         print(f"Warning: {e}")
         image_root = None  # Will only use attention images
     
-    # Output directory structure: attention_dir/inference/attn_pred_vids/{colour_scale}/video_X/layer_X/
-    output_base_dir = os.path.join(inference_dir, "attn_pred_vids", colour_scale)
+    # Output directory structure: attention_dir/inference/attn_pred_vids/{query_choice}/{scale}/video_X/layer_X/
+    # Default query_choice to "weighted_sum" if not specified (for backward compatibility)
+    if query_choice is None:
+        query_choice = "weighted_sum"
+    output_base_dir = os.path.join(inference_dir, "attn_pred_vids", query_choice, scale)
     
     # Load results and validation data
     with open(results_json) as f:
@@ -547,6 +603,8 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
     
     # Extract true species information from annotations
     true_species_by_video = {}
+    # Extract category names for folder organization
+    category_names_by_video = {}
     if "annotations" in valid_data:
         for ann in valid_data["annotations"]:
             video_id = ann["video_id"]
@@ -556,10 +614,20 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
                 if video_id not in true_species_by_video:
                     true_species_by_video[video_id] = []
                 true_species_by_video[video_id].append(true_species_name)
+                # Store category name for folder organization
+                if video_id not in category_names_by_video:
+                    category_names_by_video[video_id] = []
+                category_names_by_video[video_id].append(true_species_name)
     
     # Remove duplicates and join multiple species if present
     for video_id in true_species_by_video:
         true_species_by_video[video_id] = ", ".join(list(set(true_species_by_video[video_id])))
+    
+    # For folder organization, use first category name (or join if multiple)
+    for video_id in category_names_by_video:
+        unique_categories = list(set(category_names_by_video[video_id]))
+        # Use first category name for folder, or join with underscore if multiple
+        category_names_by_video[video_id] = unique_categories[0] if len(unique_categories) == 1 else "_".join(unique_categories)
     
     # Choose color per category
     np.random.seed(42)
@@ -593,6 +661,15 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
             skipped_videos.append((f"video_{video_id}", "No attention images found"))
             print(f"Warning: No attention images found for video {video_id}, skipping.")
             continue
+        
+        # Filter by layer if specified
+        if layer is not None:
+            if layer in available_layers:
+                available_layers = [layer]
+            else:
+                skipped_videos.append((f"video_{video_id}", f"Layer {layer} not available (available: {available_layers})"))
+                print(f"Warning: Layer {layer} not available for video {video_id} (available: {available_layers}), skipping.")
+                continue
         
         video = video_info[video_id]
         file_names = video["file_names"]
@@ -653,13 +730,16 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
             print(f"  Processing layer {layer_idx}...")
             
             # Load attention images for this layer
-            attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx)
+            attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx, viz_type=viz_type, query_choice=query_choice)
             if not attention_frame_map:
-                print(f"    Warning: No attention images found for layer {layer_idx}, skipping")
+                print(f"    Warning: No attention images found for layer {layer_idx} with viz_type={viz_type}, skipping")
                 continue
             
-            # Create output directory: output_base_dir/video_{video_id}/
-            output_dir = os.path.join(output_base_dir, f"video_{video_id}")
+            # Get category name for folder organization (use "Unknown" if not found)
+            category_name = category_names_by_video.get(video_id, "Unknown")
+            
+            # Create output directory: output_base_dir/{category_name}/video_{video_id}/
+            output_dir = os.path.join(output_base_dir, category_name, f"video_{video_id}")
             os.makedirs(output_dir, exist_ok=True)
             
             # Compute reordering indices if requested (using importance_arr which is already loaded)
@@ -696,12 +776,15 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
                 else:
                     original_frame_idx = frame_idx - 1
                 
+                # Get original filename for loading original frame
+                original_fn = file_names[original_frame_idx] if original_frame_idx < len(file_names) else fn
+                
                 # Use attention image if available, otherwise fall back to original frame
                 # Use original_frame_idx to look up in attention_frame_map (which uses original indices)
                 if original_frame_idx in attention_frame_map:
                     img_path = attention_frame_map[original_frame_idx]
                     # Extract frame number from PNG filename (1-based)
-                    png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx)
+                    png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx, viz_type=viz_type)
                     if png_frame_num is not None:
                         display_frame_num = png_frame_num + 1  # Convert to 1-based
                     else:
@@ -744,16 +827,41 @@ def _visualize_predictions_for_colour_scale(attention_dir, val_json_path, colour
                 # Draw original name (folder_name) in top right corner, small font
                 draw_small_top_right_label(frame, folder_name)
                 
-                # Draw mask outline (masks are already at correct dimensions)
-                # fn is already the reordered filename, so we can use it directly with frame_masks
-                for mask, color in frame_masks.get(fn, []):
-                    draw_mask_outline(frame, mask, color)
+                # Draw mask outline only if NOT reordering (when reordering, masks go on original frames only)
+                if not reorder:
+                    # Draw mask outline (masks are already at correct dimensions)
+                    # fn is already the reordered filename, so we can use it directly with frame_masks
+                    for mask, color in frame_masks.get(fn, []):
+                        draw_mask_outline(frame, mask, color)
                 
                 if out is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                     out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame.shape[1], frame.shape[0]))
                 
                 out.write(frame)
+                
+                # If reordering, also add the original frame right after the attention frame
+                if reorder and image_root and original_frame_idx in attention_frame_map:
+                    # Load original frame using original filename
+                    original_img_path = os.path.join(image_root, original_fn)
+                    original_frame = cv2.imread(original_img_path)
+                    if original_frame is not None:
+                        # Resize to match video dimensions if needed
+                        if original_frame.shape[:2] != (height, width):
+                            original_frame = cv2.resize(original_frame, (width, height))
+                        
+                        # Apply same annotations to original frame
+                        draw_truth_and_prediction(original_frame, true_species, pred_species_name, best_pred["score"])
+                        draw_frame_refiner_and_importance(original_frame, display_frame_num, total_frames, refiner_id, imp_val)
+                        draw_small_top_right_label(original_frame, folder_name)
+                        
+                        # Draw mask outline on original frame (use original_fn for mask lookup)
+                        for mask, color in frame_masks.get(original_fn, []):
+                            draw_mask_outline(original_frame, mask, color)
+                        
+                        out.write(original_frame)
+                    else:
+                        print(f"    Warning: Could not load original frame from {original_img_path}")
             
             if out:
                 out.release()
@@ -786,6 +894,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
     
     # Extract true species information from annotations
     true_species_by_video = {}
+    # Extract category names for folder organization
+    category_names_by_video = {}
     if "annotations" in valid_data:
         for ann in valid_data["annotations"]:
             video_id = ann["video_id"]
@@ -795,15 +905,25 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
                 if video_id not in true_species_by_video:
                     true_species_by_video[video_id] = []
                 true_species_by_video[video_id].append(true_species_name)
+                # Store category name for folder organization
+                if video_id not in category_names_by_video:
+                    category_names_by_video[video_id] = []
+                category_names_by_video[video_id].append(true_species_name)
     
     # Remove duplicates and join multiple species if present
     for video_id in true_species_by_video:
         true_species_by_video[video_id] = ", ".join(list(set(true_species_by_video[video_id])))
-
+    
+    # For folder organization, use first category name (or join if multiple)
+    for video_id in category_names_by_video:
+        unique_categories = list(set(category_names_by_video[video_id]))
+        # Use first category name for folder, or join with underscore if multiple
+        category_names_by_video[video_id] = unique_categories[0] if len(unique_categories) == 1 else "_".join(unique_categories)
+    
     # Choose color per category
     np.random.seed(42)
     category_colors = {cat_id: tuple(np.random.randint(0, 256, 3).tolist()) for cat_id in categories}
-
+    
     # Group ALL predictions by video_id (no threshold filtering)
     all_preds_by_video = {}
     for pred in predictions:
@@ -885,7 +1005,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
         # Load attention images if using decoder attention plots
         attention_frame_map = {}
         if use_attention_images:
-            attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx)
+            # Note: visualize_predictions doesn't have viz_type parameter, so default to None (matches any)
+            attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx, viz_type=None)
             if not attention_frame_map:
                 print(f"  Warning: No attention images found for video {video_id}, layer {layer_idx}, using original frames")
                 use_attention_images = False
@@ -897,11 +1018,18 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
             print(f"  Skipping video {video_id} - no masks to visualize")
             continue
 
+        # Get category name for folder organization (use "Unknown" if not found)
+        category_name = category_names_by_video.get(video_id, "Unknown")
+        
+        # Create category subdirectory
+        category_output_dir = os.path.join(output_dir, category_name)
+        os.makedirs(category_output_dir, exist_ok=True)
+
         # Save file as top_pred_video_<video_id>.mp4 (or with layer suffix if using attention images)
         if use_attention_images:
-            output_video_path = os.path.join(output_dir, f"top_pred_video_{video_id}_layer_{layer_idx}_attention.mp4")
+            output_video_path = os.path.join(category_output_dir, f"top_pred_video_{video_id}_layer_{layer_idx}_attention.mp4")
         else:
-            output_video_path = os.path.join(output_dir, f"top_pred_video_{video_id}.mp4")
+            output_video_path = os.path.join(category_output_dir, f"top_pred_video_{video_id}.mp4")
         fps = 10
         out = None
 
@@ -910,7 +1038,8 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir,
             if use_attention_images and (frame_idx - 1) in attention_frame_map:
                 img_path = attention_frame_map[frame_idx - 1]
                 # Extract frame number from PNG filename (1-based)
-                png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx)
+                # Note: visualize_predictions doesn't have viz_type parameter, so default to None (matches any)
+                png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx, viz_type=None)
                 if png_frame_num is not None:
                     display_frame_num = png_frame_num + 1  # Convert to 1-based
                 else:
@@ -1009,12 +1138,12 @@ if __name__ == "__main__":
         help="Path to val.json file to use for finding original images. If not provided, will search automatically."
     )
     parser.add_argument(
-        "--colour-scale",
+        "--scale",
         type=str,
         default=None,
         choices=["across_frames", "per_frame", "temporal_across_frames", "temporal_per_frame"],
-        help="Colour scale type to use for decoder attention images. If not provided, "
-             "processes all available colour scale types found in decoder_attention_plots directory."
+        help="Scale type to use for decoder attention images. If not provided, "
+             "processes all available scale types found in decoder_attention_plots directory."
     )
     parser.add_argument(
         "--reorder",
@@ -1022,12 +1151,37 @@ if __name__ == "__main__":
         help="If set, reorder frames according to max-to-min ordering of attention vector. "
              "Video names will have '_reordered' suffix."
     )
+    parser.add_argument(
+        "--viz-type",
+        type=str,
+        choices=["heatmap", "grid", "grid_heatmap", "heatmap_num"],
+        default="grid_heatmap",
+        help="Visualization type to look for in attention image filenames: 'heatmap', 'grid', 'grid_heatmap', or 'heatmap_num' (default: grid_heatmap)"
+    )
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=None,
+        help="Optional layer index to filter by. If provided, only processes videos for this layer (e.g., --layer 8)."
+    )
+    parser.add_argument(
+        "--query-choice",
+        type=str,
+        choices=["top", "weighted_sum"],
+        default="weighted_sum",
+        help="Query choice to filter attention images by: 'top' uses query_* pattern files, 'weighted_sum' uses weighted_sum files. "
+             "If not provided, defaults to 'weighted_sum' for backward compatibility. "
+             "Output videos will be organized in query_choice/scale/... directory structure."
+    )
     
     args = parser.parse_args()
     
     visualize_predictions_from_attention_dir(
         args.attention_dir, 
         val_json_path=args.val_json,
-        colour_scale=args.colour_scale,
-        reorder=args.reorder
+        scale=args.scale,
+        reorder=args.reorder,
+        viz_type=args.viz_type,
+        layer=args.layer,
+        query_choice=args.query_choice
     )
