@@ -21,7 +21,7 @@ MODEL:
     TEST:
       TASK: 'vis'  # video instance segmentation task
       WINDOW_INFERENCE: True  # run inference on small frame windows for memory savings
-      WINDOW_SIZE: 200   # size of the window for inference (smaller = less memory)
+      WINDOW_SIZE: 100   # size of the window for inference (smaller = less memory)
   VIDEO_HEAD:
     NUM_NEW_INS: 10  # maximum number of new instances to consider per frame
     TRAINING_SELECT_THRESHOLD: 0.02
@@ -40,9 +40,9 @@ DATASETS:
 SOLVER:
   IMS_PER_BATCH: 1  # Reduced batch size for higher resolution training
   BASE_LR: 0.00005  # REDUCED: More stable learning rate for classification (was 0.0001)
-  STEPS: (2424, 3232)     # ADJUSTED: Iterations at which the learning rate is decreased (60% and 80% of 3680)
-  MAX_ITER: 4040     # INCREASED: Maximum number of training iterations (30 epochs - was 20 epochs)
-  WARMUP_ITERS: 202   # INCREASED: Number of iterations for learning rate warmup (5% of 3680)
+  STEPS: (2626,)     # ADJUSTED: Iterations at which the learning rate is decreased (60% and 80% of 3680)
+  MAX_ITER: 6060     # INCREASED: Maximum number of training iterations (30 epochs - was 20 epochs)
+  WARMUP_ITERS: 303   # INCREASED: Number of iterations for learning rate warmup (5% of 3680)
   CHECKPOINT_PERIOD: 202  # How often (in iterations) to save checkpoints (every epoch)
   BACKBONE_MULTIPLIER: 0.3  # ADJUSTED: Higher multiplier for backbone fine-tuning (was 0.1)
   # Memory optimization settings
@@ -54,17 +54,17 @@ SOLVER:
 
 INPUT:
   # Higher resolution training with enhanced size variations for better generalization
-  MIN_SIZE_TRAIN: (192,)  # range or lengths of the shorter side of the images (use trailing comma for single-element tuple)
+  MIN_SIZE_TRAIN: (240,)  # range or lengths of the shorter side of the images (use trailing comma for single-element tuple)
   MIN_SIZE_TRAIN_SAMPLING: "choice_by_clip"  # Sample different sizes per clip
   MAX_SIZE_TRAIN: 1280  # max length of the longer side of the images (aspect ratio is preserved)
   
   # Testing sizes
-  MIN_SIZE_TEST: 192 # minimum length of the shorter side of the images
+  MIN_SIZE_TEST: 240 # minimum length of the shorter side of the images
   MAX_SIZE_TEST: 1280 # maximum length of the longer side of the images
   
   # Frame sampling
-  SAMPLING_FRAME_NUM: 201  # number of frames to sample from each video clip during training
-  SAMPLING_FRAME_RANGE: 100 # how many frames to sample before and after the reference frame
+  SAMPLING_FRAME_NUM: 115  # number of frames to sample from each video clip during training
+  SAMPLING_FRAME_RANGE: 57 # how many frames to sample before and after the reference frame
   SAMPLING_FRAME_STRIDE: 1 # 1 is every frame, 2 is every other frame, etc.
   
   # MOTION-PRESERVING AUGMENTATIONS ONLY
@@ -96,4 +96,4 @@ TEST:
 DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: True # whether to filter out images with no annotations
 
-OUTPUT_DIR: '/store/simone/dvis-model-outputs/trained_models/model_camera_192_201'
+OUTPUT_DIR: '/store/simone/dvis-model-outputs/trained_models/model_camera_240_115'
