@@ -54,10 +54,15 @@ def create_combined_plot(scrambled_dir, best_model_dir, output_path=None):
     scrambled_df = load_scrambled_data(scrambled_dir)
     best_model_df = load_best_model_data(best_model_dir)
     
-    # Metrics to plot
-    metrics = ['ap_instance_per_cat', 'ap50_instance_per_cat', 'ap75_instance_per_cat']
-    metric_labels = ['AP', 'AP50', 'AP75']
-    metric_colors = ['#1f77b4', '#2ca02c', '#ff7f0e']  # Blue, Green, Orange
+    # Metrics to plot - only AP for silhouette, all metrics for camera
+    if model_type == 'Silhouette':
+        metrics = ['ap_instance_per_cat']
+        metric_labels = ['AP']
+        metric_colors = ['#1f77b4']  # Blue
+    else:
+        metrics = ['ap_instance_per_cat', 'ap50_instance_per_cat', 'ap75_instance_per_cat']
+        metric_labels = ['AP', 'AP50', 'AP75']
+        metric_colors = ['#1f77b4', '#2ca02c', '#ff7f0e']  # Blue, Green, Orange
     
     # Get categories (keep original order from CSV)
     categories = scrambled_df['category_name'].unique().tolist()
@@ -173,17 +178,19 @@ def create_combined_plot(scrambled_dir, best_model_dir, output_path=None):
         
         # Scrambled data with error bars (no connecting lines)
         ax.errorbar(x_positions, all_scrambled_values[metric], yerr=all_scrambled_errors[metric],
-                   fmt='o', capsize=3, capthick=1, elinewidth=1, markersize=6,
-                   label=f'Scrambled {metric_label}', color=color, alpha=0.7)
+                   fmt='o', capsize=5, capthick=3, elinewidth=3, markersize=12,
+                   label=f'Scrambled {metric_label}', color=color, alpha=0.7, 
+                   markeredgecolor='red', markeredgewidth=1, zorder=6)
         
         # Best model data
-        ax.scatter(x_positions, all_best_model_values[metric], s=80, marker='s',
-                  label=f'Original {metric_label}', color=color, alpha=0.7, zorder=5, edgecolors='darkred', linewidths=0.5)
+        ax.scatter(x_positions, all_best_model_values[metric], s=150, marker='s',
+                  label=f'Original {metric_label}', color=color, alpha=0.7, zorder=5, 
+                  edgecolors='none', linewidths=0)
     
     # Customize plot
-    ax.set_ylabel('AP Score', fontsize=18)
-    title_text = f'{model_type} Model Performance Metrics on Original vs Scrambled Videos'
-    ax.set_title(title_text, fontsize=22, fontweight='bold', pad=20)
+    ax.set_ylabel('Average Precision (AP)', fontsize=24)
+    title_text = f'{model_type}'
+    ax.set_title(title_text, fontsize=28, fontweight='bold', pad=20)
     ax.set_xticks(category_centers)
     
     # Create custom labels with "Mean" in bold
@@ -194,8 +201,8 @@ def create_combined_plot(scrambled_dir, best_model_dir, output_path=None):
         else:
             tick_labels.append(cat)
     
-    ax.set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=16)
-    ax.tick_params(axis='y', labelsize=16)
+    ax.set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=20)
+    ax.tick_params(axis='y', labelsize=20)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='lower left', fontsize=14)
     
@@ -205,7 +212,7 @@ def create_combined_plot(scrambled_dir, best_model_dir, output_path=None):
         all_values.extend([v for v in all_scrambled_values[metric] + all_best_model_values[metric] if not np.isnan(v)])
     if all_values:
         y_min = max(0, min(all_values) - 10)
-        y_max = min(100, max(all_values) + 10)
+        y_max = 100
         ax.set_ylim(y_min, y_max)
     
     plt.tight_layout()
@@ -224,9 +231,22 @@ def create_plot(scrambled_dir, best_model_dir, output_path=None):
     scrambled_df = load_scrambled_data(scrambled_dir)
     best_model_df = load_best_model_data(best_model_dir)
     
-    # Metrics to plot
-    metrics = ['ap_instance_per_cat', 'ap50_instance_per_cat', 'ap75_instance_per_cat']
-    metric_labels = ['AP', 'AP50', 'AP75']
+    # Determine model type from directory name
+    combined_path = str(scrambled_dir) + str(best_model_dir)
+    if 'camera' in combined_path.lower():
+        model_type = 'Camera'
+    elif 'silhouette' in combined_path.lower():
+        model_type = 'Silhouette'
+    else:
+        model_type = 'Model'  # Default if neither found
+    
+    # Metrics to plot - only AP for silhouette, all metrics for camera
+    if model_type == 'Silhouette':
+        metrics = ['ap_instance_per_cat']
+        metric_labels = ['AP']
+    else:
+        metrics = ['ap_instance_per_cat', 'ap50_instance_per_cat', 'ap75_instance_per_cat']
+        metric_labels = ['AP', 'AP50', 'AP75']
     
     # Get categories (keep original order from CSV)
     categories = scrambled_df['category_name'].unique().tolist()
@@ -275,7 +295,10 @@ def create_plot(scrambled_dir, best_model_dir, output_path=None):
         categories = list(categories) + ['All']
     
     # Create figure with subplots for each metric
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    n_metrics = len(metrics)
+    fig, axes = plt.subplots(1, n_metrics, figsize=(6 * n_metrics, 6))
+    if n_metrics == 1:
+        axes = [axes]  # Make it iterable
     
     for idx, (metric, metric_label) in enumerate(zip(metrics, metric_labels)):
         ax = axes[idx]
@@ -337,12 +360,14 @@ def create_plot(scrambled_dir, best_model_dir, output_path=None):
         # Create scatter plot
         # Scrambled data with error bars (95% CI)
         ax.errorbar(x_positions, scrambled_values, yerr=scrambled_errors,
-                   fmt='o', capsize=5, capthick=1, elinewidth=1, markersize=8,
-                   label='Scrambled', color='blue', alpha=0.7)
+                   fmt='o', capsize=5, capthick=3, elinewidth=3, markersize=12,
+                   label='Scrambled', color='blue', alpha=0.7,
+                   markeredgecolor='red', markeredgewidth=1, zorder=6)
         
         # Best model data
-        ax.scatter(x_positions, best_model_values, s=100, marker='s',
-                  label='Original', color='red', alpha=0.7, zorder=5)
+        ax.scatter(x_positions, best_model_values, s=150, marker='s',
+                  label='Original', color='red', alpha=0.7, zorder=5,
+                  edgecolors='none', linewidths=0)
         
         # Customize plot
         ax.set_xlabel('Category', fontsize=12)
@@ -357,7 +382,7 @@ def create_plot(scrambled_dir, best_model_dir, output_path=None):
         all_values = [v for v in scrambled_values + best_model_values if not np.isnan(v)]
         if all_values:
             y_min = max(0, min(all_values) - 10)
-            y_max = min(100, max(all_values) + 10)
+            y_max = 100
             ax.set_ylim(y_min, y_max)
     
     plt.tight_layout()
@@ -494,16 +519,18 @@ def create_ap75_plot(scrambled_dir, best_model_dir, output_path=None):
     
     # Scrambled data with error bars (matching combined plot style)
     ax.errorbar(category_centers, scrambled_values, yerr=scrambled_errors,
-               fmt='o', capsize=3, capthick=1, elinewidth=1, markersize=8,
-               label=f'Scrambled {metric_label}', color=color, alpha=0.7)
+               fmt='o', capsize=5, capthick=3, elinewidth=3, markersize=12,
+               label=f'Scrambled {metric_label}', color=color, alpha=0.7,
+               markeredgecolor='red', markeredgewidth=1, zorder=6)
     
     # Best model data (matching combined plot style)
-    ax.scatter(category_centers, best_model_values, s=100, marker='s',
-              label=f'Original {metric_label}', color=color, alpha=0.7, zorder=5, edgecolors='darkred', linewidths=0.5)
+    ax.scatter(category_centers, best_model_values, s=150, marker='s',
+              label=f'Original {metric_label}', color=color, alpha=0.7, zorder=5,
+              edgecolors='none', linewidths=0)
     
     # Customize plot (matching combined plot style)
-    ax.set_ylabel('AP Score', fontsize=18)
-    title_text = f'{model_type} Model Performance Metrics on Original vs Scrambled Videos'
+    ax.set_ylabel('Average Precision (AP)', fontsize=18)
+    title_text = f'{model_type}'
     ax.set_title(title_text, fontsize=22, fontweight='bold', pad=20)
     ax.set_xticks(category_centers)
     
@@ -524,7 +551,7 @@ def create_ap75_plot(scrambled_dir, best_model_dir, output_path=None):
     all_values = [v for v in scrambled_values + best_model_values if not np.isnan(v)]
     if all_values:
         y_min = max(0, min(all_values) - 10)
-        y_max = min(100, max(all_values) + 10)
+        y_max = 100
         ax.set_ylim(y_min, y_max)
     
     plt.tight_layout()
@@ -555,18 +582,18 @@ def find_other_model_dir(current_dir):
 
 
 def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None):
-    """Create AP75 plot comparing both camera and silhouette models."""
+    """Create AP plot comparing both camera and silhouette models."""
     
     # Determine which model type we're starting with
     combined_path = str(scrambled_dir) + str(best_model_dir)
     if 'camera' in combined_path.lower():
         primary_model = 'camera'
-        primary_color = '#ff7f0e'  # Orange
-        secondary_color = '#2ca02c'  # Green
+        primary_color = '#d62728'  # Red
+        secondary_color = '#9467bd'  # Purple
     elif 'silhouette' in combined_path.lower():
         primary_model = 'silhouette'
-        primary_color = '#2ca02c'  # Green
-        secondary_color = '#ff7f0e'  # Orange
+        primary_color = '#9467bd'  # Purple
+        secondary_color = '#d62728'  # Red
     else:
         raise ValueError("Could not determine model type from directory paths. Must contain 'camera' or 'silhouette'.")
     
@@ -583,9 +610,9 @@ def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None
     secondary_scrambled_df = load_scrambled_data(other_scrambled_dir)
     secondary_best_model_df = load_best_model_data(other_best_model_dir)
     
-    # Only AP75 metric
-    metric = 'ap75_instance_per_cat'
-    metric_label = 'AP75'
+    # Only AP metric
+    metric = 'ap_instance_per_cat'
+    metric_label = 'AP'
     
     # Get categories (use primary model's categories as reference)
     categories = primary_scrambled_df['category_name'].unique().tolist()
@@ -632,8 +659,8 @@ def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None
     if primary_all_data or secondary_all_data:
         categories = list(categories) + ['Mean']
     
-    # Create single figure
-    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+    # Create single figure (wider to accommodate legend on the right)
+    fig, ax = plt.subplots(1, 1, figsize=(18, 8))
     
     # Prepare data for plotting
     def get_category_data(category, scrambled_df, best_model_df, all_data):
@@ -702,18 +729,19 @@ def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None
         
         # Scrambled data with error bars
         ax.errorbar(x_positions, scrambled_values, yerr=scrambled_errors,
-                   fmt='o', capsize=3, capthick=1, elinewidth=1, markersize=8,
-                   label=f'Scrambled {model_name}', color=color, alpha=0.7)
+                   fmt='o', capsize=5, capthick=3, elinewidth=3, markersize=12,
+                   label=f'Scrambled {model_name} {metric_label}', color=color, alpha=0.7,
+                   markeredgecolor='red', markeredgewidth=1, zorder=6)
         
         # Best model data
-        ax.scatter(x_positions, best_model_values, s=100, marker='s',
-                  label=f'Original {model_name}', color=color, alpha=0.7, zorder=5, 
-                  edgecolors='darkred', linewidths=0.5)
+        ax.scatter(x_positions, best_model_values, s=150, marker='s',
+                  label=f'Original {model_name} {metric_label}', color=color, alpha=0.7, zorder=5,
+                  edgecolors='none', linewidths=0)
     
     # Customize plot
-    ax.set_ylabel('AP Score', fontsize=18)
-    title_text = 'Camera vs Silhouette Model AP75 Performance on Original vs Scrambled Videos'
-    ax.set_title(title_text, fontsize=22, fontweight='bold', pad=20)
+    ax.set_ylabel('Average Precision (AP)', fontsize=24)
+    title_text = 'Camera vs Silhouette'
+    ax.set_title(title_text, fontsize=28, fontweight='bold', pad=20)
     ax.set_xticks(category_centers)
     
     # Create custom labels with "Mean" in bold
@@ -724,10 +752,10 @@ def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None
         else:
             tick_labels.append(cat)
     
-    ax.set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=16)
-    ax.tick_params(axis='y', labelsize=16)
+    ax.set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=20)
+    ax.tick_params(axis='y', labelsize=20)
     ax.grid(True, alpha=0.3, linestyle='--')
-    ax.legend(loc='lower left', fontsize=12)
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=18)
     
     # Set y-axis limits - collect all values from both models
     all_values = []
@@ -746,14 +774,16 @@ def create_both_models_ap75_plot(scrambled_dir, best_model_dir, output_path=None
     
     if all_values:
         y_min = max(0, min(all_values) - 10)
-        y_max = min(100, max(all_values) + 10)
+        y_max = 100
         ax.set_ylim(y_min, y_max)
     
+    # Adjust layout to keep plot area the same size and add space for legend on the right
+    plt.subplots_adjust(right=0.78)
     plt.tight_layout()
     
     # Save plot
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Both models AP75 plot saved to {output_path}")
+    print(f"Both models AP plot saved to {output_path}")
     
     plt.close()
 
@@ -786,7 +816,7 @@ def main():
     parser.add_argument(
         '--both_models',
         action='store_true',
-        help='Create a plot comparing both camera and silhouette models (AP75 only). Automatically finds the other model directory by substituting camera/silhouette in the path.'
+        help='Create a plot comparing both camera and silhouette models (AP only). Automatically finds the other model directory by substituting camera/silhouette in the path.'
     )
     
     args = parser.parse_args()
@@ -811,7 +841,7 @@ def main():
         if args.output:
             both_models_output_path = args.output
         else:
-            both_models_output_path = os.path.join(scrambled_dir, "scrambled_vs_best_model_comparison_both_models_ap75.png")
+            both_models_output_path = os.path.join(scrambled_dir, "scrambled_vs_best_model_comparison_both_models_ap.png")
     
     print("=" * 60)
     print(f"Scrambled directory: {scrambled_dir}")
