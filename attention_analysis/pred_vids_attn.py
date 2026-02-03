@@ -7,6 +7,10 @@ from pathlib import Path
 from tqdm import tqdm
 from pycocotools import mask as mask_utils
 from typing import Optional
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 def load_activation_proj_weights(inference_dir: str, video_id: int) -> Optional[np.ndarray]:
     """
@@ -170,6 +174,88 @@ def draw_small_top_right_label(frame, text):
     # background box
     cv2.rectangle(frame, (x - 4, y - text_height - 4), (x + text_width + 4, y + 4), bg_color, -1)
     cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+
+def create_frame_importance_plot(importance_arr, current_frame_idx, height, width):
+    """
+    Create a frame importance plot with accumulating red background.
+    
+    Args:
+        importance_arr: Array of importance values (should sum to 1, not min-max normalized)
+        current_frame_idx: Current frame index (0-based) - all frames up to and including this will have red background
+        height: Height of the plot image (should match video height)
+        width: Width of the plot image (should match video width)
+    
+    Returns:
+        numpy array (BGR format) of the plot image
+    """
+    num_frames = len(importance_arr)
+    if num_frames == 0:
+        # Return blank image if no importance data
+        return np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Create figure with no margins
+    fig, ax = plt.subplots(figsize=(width/100, height/100), dpi=100)
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    # Set x-axis limits first (before drawing anything)
+    ax.set_xlim(-0.5, num_frames - 0.5)
+    
+    # Get y-axis limits (will be set automatically by bar chart, but we need to set a reasonable range first)
+    max_importance = np.max(importance_arr) if len(importance_arr) > 0 else 1.0
+    ax.set_ylim(0, max_importance * 1.1)  # Add 10% padding at top
+    
+    # Create frame indices (0-based)
+    frame_indices = np.arange(num_frames)
+    
+    # Add pale red background for all frames up to and including current_frame_idx
+    # Draw this BEFORE the bars so bars appear on top
+    if current_frame_idx >= 0:
+        y_min, y_max = ax.get_ylim()
+        # Bar width is 1.0 (from -0.5 to num_frames-0.5, each bar centered at integer positions)
+        bar_width = 1.0
+        
+        # Draw red background rectangles for all frames up to current_frame_idx
+        for i in range(min(current_frame_idx + 1, num_frames)):
+            # Bar center is at i, so left edge is at i - 0.5
+            x_left = i - 0.5
+            # Draw pale red rectangle behind the bar
+            rect = Rectangle((x_left, y_min), bar_width, y_max - y_min, 
+                           facecolor='lightcoral', alpha=0.3, edgecolor='none', zorder=0)
+            ax.add_patch(rect)
+    
+    # Create bar chart (draw on top of red background)
+    bars = ax.bar(frame_indices, importance_arr, color='steelblue', edgecolor='navy', linewidth=0.5, zorder=1)
+    
+    # Set labels and title
+    ax.set_xlabel('Frame Index', fontsize=10)
+    ax.set_ylabel('Importance', fontsize=10)
+    ax.set_title('Frame Importance', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--', zorder=0.5)
+    
+    # Remove margins
+    plt.tight_layout(pad=0)
+    ax.margins(0)
+    
+    # Convert to numpy array (RGB format)
+    fig.canvas.draw()
+    # Use modern matplotlib API to get RGB buffer
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (4,))  # RGBA format
+    # Convert RGBA to RGB
+    buf = buf[:, :, :3]  # Remove alpha channel
+    
+    # Close figure to free memory
+    plt.close(fig)
+    
+    # Resize to exact dimensions if needed
+    if buf.shape[:2] != (height, width):
+        buf = cv2.resize(buf, (width, height))
+    
+    # Convert RGB to BGR for OpenCV
+    buf_bgr = cv2.cvtColor(buf, cv2.COLOR_RGB2BGR)
+    
+    return buf_bgr
 
 def find_val_json(base_dir: str) -> Optional[str]:
     """
@@ -495,7 +581,9 @@ def visualize_predictions_from_attention_dir(attention_dir, val_json_path=None, 
         scale: Optional scale type ("across_frames", "per_frame", "temporal_across_frames", 
                      "temporal_per_frame"). If None, processes all available scales.
         reorder: If True, reorder frames according to max-to-min ordering of attention vector.
-        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num") to look for in filenames.
+        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num", "no_overlay", "frame_importance") to look for in filenames.
+                  "no_overlay" uses original frames without attention maps but still includes all annotations.
+                  "frame_importance" creates a side-by-side video with original frames on the left and frame importance plot on the right.
         layer: Optional layer index to filter by. If provided, only processes videos for this layer.
         query_choice: Optional query choice ("top" or "weighted_sum") to filter attention images by.
     """
@@ -545,7 +633,9 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
         decoder_attention_plots_base_dir: Base directory containing scale subdirectories
         results_json: Path to results_temporal.json
         reorder: If True, reorder frames according to max-to-min ordering of attention vector.
-        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num") to look for in filenames.
+        viz_type: Visualization type ("heatmap", "grid", "grid_heatmap", "heatmap_num", "no_overlay", "frame_importance") to look for in filenames.
+                  "no_overlay" uses original frames without attention maps but still includes all annotations.
+                  "frame_importance" creates a side-by-side video with original frames on the left and frame importance plot on the right.
         layer: Optional layer index to filter by. If provided, only processes videos for this layer.
         query_choice: Optional query choice ("top" or "weighted_sum") to filter attention images by.
     """
@@ -553,11 +643,15 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
     
     # Auto-detect paths
     inference_dir = os.path.join(attention_dir, "inference")
-    decoder_attention_plots_dir = os.path.join(decoder_attention_plots_base_dir, scale)
     
-    if not os.path.exists(decoder_attention_plots_dir):
-        print(f"Warning: Scale directory not found: {decoder_attention_plots_dir}, skipping")
-        return
+    # For no_overlay and frame_importance, skip decoder_attention_plots_dir check (not needed)
+    if viz_type not in ["no_overlay", "frame_importance"]:
+        decoder_attention_plots_dir = os.path.join(decoder_attention_plots_base_dir, scale)
+        if not os.path.exists(decoder_attention_plots_dir):
+            print(f"Warning: Scale directory not found: {decoder_attention_plots_dir}, skipping")
+            return
+    else:
+        decoder_attention_plots_dir = None
     
     # Find val.json
     try:
@@ -585,11 +679,21 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
         print(f"Warning: {e}")
         image_root = None  # Will only use attention images
     
-    # Output directory structure: attention_dir/inference/attn_pred_vids/{query_choice}/{scale}/video_X/layer_X/
+    # Output directory structure depends on viz_type:
+    # - For "no_overlay": attention_dir/inference/attn_pred_vids/no_overlay/
+    # - For "frame_importance": attention_dir/inference/attn_pred_vids/no_overlay/frame_importance/
+    # - For others: attention_dir/inference/attn_pred_vids/{query_choice}/{scale}/
     # Default query_choice to "weighted_sum" if not specified (for backward compatibility)
     if query_choice is None:
         query_choice = "weighted_sum"
-    output_base_dir = os.path.join(inference_dir, "attn_pred_vids", query_choice, scale)
+    
+    # For no_overlay and frame_importance, use no_overlay subdirectory (no layer/query/scale needed)
+    if viz_type == "no_overlay":
+        output_base_dir = os.path.join(inference_dir, "attn_pred_vids", "no_overlay")
+    elif viz_type == "frame_importance":
+        output_base_dir = os.path.join(inference_dir, "attn_pred_vids", "no_overlay", "frame_importance")
+    else:
+        output_base_dir = os.path.join(inference_dir, "attn_pred_vids", query_choice, scale)
     
     # Load results and validation data
     with open(results_json) as f:
@@ -655,21 +759,26 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
             print(f"Warning: Video id {video_id} not found in valid_json, skipping.")
             continue
         
-        # Find available layers for this video
-        available_layers = find_available_layers(decoder_attention_plots_dir, video_id)
-        if not available_layers:
-            skipped_videos.append((f"video_{video_id}", "No attention images found"))
-            print(f"Warning: No attention images found for video {video_id}, skipping.")
-            continue
-        
-        # Filter by layer if specified
-        if layer is not None:
-            if layer in available_layers:
-                available_layers = [layer]
-            else:
-                skipped_videos.append((f"video_{video_id}", f"Layer {layer} not available (available: {available_layers})"))
-                print(f"Warning: Layer {layer} not available for video {video_id} (available: {available_layers}), skipping.")
+        # For no_overlay and frame_importance, skip layer processing (not needed)
+        if viz_type in ["no_overlay", "frame_importance"]:
+            # Process video directly without layer loop
+            available_layers = [None]  # Use None as placeholder to process once
+        else:
+            # Find available layers for this video
+            available_layers = find_available_layers(decoder_attention_plots_dir, video_id)
+            if not available_layers:
+                skipped_videos.append((f"video_{video_id}", "No attention images found"))
+                print(f"Warning: No attention images found for video {video_id}, skipping.")
                 continue
+            
+            # Filter by layer if specified
+            if layer is not None:
+                if layer in available_layers:
+                    available_layers = [layer]
+                else:
+                    skipped_videos.append((f"video_{video_id}", f"Layer {layer} not available (available: {available_layers})"))
+                    print(f"Warning: Layer {layer} not available for video {video_id} (available: {available_layers}), skipping.")
+                    continue
         
         video = video_info[video_id]
         file_names = video["file_names"]
@@ -697,7 +806,8 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
         print(f"  Best prediction: {pred_species_name} (score: {best_pred['score']:.4f})")
         if refiner_id is not None:
             print(f"  Refiner ID: {refiner_id}")
-        print(f"  Available layers: {available_layers}")
+        if viz_type not in ["no_overlay", "frame_importance"]:
+            print(f"  Available layers: {available_layers}")
         
         # Create frame masks from the best prediction only
         frame_masks = {fn: [] for fn in file_names}
@@ -725,15 +835,38 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
         # Attention images are now saved at video dimensions (same as masks), so no resizing needed
         print(f"  Video dimensions (masks and attention images): {width}x{height}")
         
-        # Process each available layer
+        # Process each available layer (or once for no_overlay/frame_importance)
         for layer_idx in available_layers:
-            print(f"  Processing layer {layer_idx}...")
+            if layer_idx is not None:
+                print(f"  Processing layer {layer_idx}...")
+            else:
+                # For no_overlay and frame_importance, no layer processing needed
+                if viz_type == "no_overlay":
+                    print(f"  Processing no_overlay video...")
+                elif viz_type == "frame_importance":
+                    print(f"  Processing frame_importance video...")
             
-            # Load attention images for this layer
-            attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx, viz_type=viz_type, query_choice=query_choice)
-            if not attention_frame_map:
-                print(f"    Warning: No attention images found for layer {layer_idx} with viz_type={viz_type}, skipping")
-                continue
+            # Load attention images for this layer (skip if viz_type is "no_overlay" or "frame_importance")
+            if viz_type == "no_overlay":
+                attention_frame_map = {}
+                if not image_root:
+                    print(f"    Warning: viz_type='no_overlay' requires image_root, but it's not available. Skipping.")
+                    continue
+                print(f"    Using 'no_overlay' mode: original frames without attention maps")
+            elif viz_type == "frame_importance":
+                attention_frame_map = {}
+                if not image_root:
+                    print(f"    Warning: viz_type='frame_importance' requires image_root, but it's not available. Skipping.")
+                    continue
+                if importance_arr is None:
+                    print(f"    Warning: viz_type='frame_importance' requires importance_arr, but it's not available. Skipping.")
+                    continue
+                print(f"    Using 'frame_importance' mode: side-by-side video with frame importance plot")
+            else:
+                attention_frame_map = find_attention_images(decoder_attention_plots_dir, video_id, layer_idx, viz_type=viz_type, query_choice=query_choice)
+                if not attention_frame_map:
+                    print(f"    Warning: No attention images found for layer {layer_idx} with viz_type={viz_type}, skipping")
+                    continue
             
             # Get category name for folder organization (use "Unknown" if not found)
             category_name = category_names_by_video.get(video_id, "Unknown")
@@ -763,9 +896,23 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
             
             # Output video path
             reorder_suffix = "_reordered" if (reorder and reorder_indices is not None) else ""
-            output_video_path = os.path.join(output_dir, f"video_{video_id}_layer_{layer_idx}_attention{reorder_suffix}.mp4")
+            if viz_type == "no_overlay":
+                attention_suffix = "_no_overlay"
+                # For no_overlay and frame_importance, no layer suffix needed
+                output_video_path = os.path.join(output_dir, f"video_{video_id}{attention_suffix}{reorder_suffix}.mp4")
+            elif viz_type == "frame_importance":
+                attention_suffix = "_frame_importance"
+                # For no_overlay and frame_importance, no layer suffix needed
+                output_video_path = os.path.join(output_dir, f"video_{video_id}{attention_suffix}{reorder_suffix}.mp4")
+            else:
+                attention_suffix = "_attention"
+                output_video_path = os.path.join(output_dir, f"video_{video_id}_layer_{layer_idx}{attention_suffix}{reorder_suffix}.mp4")
             fps = 10
             out = None
+            
+            # For frame_importance, video width will be doubled
+            output_width = width * 2 if viz_type == "frame_importance" else width
+            output_height = height
             
             for frame_idx, fn in enumerate(file_names_to_use, start=1):
                 # Map frame_idx back to original index if reordered
@@ -779,9 +926,18 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
                 # Get original filename for loading original frame
                 original_fn = file_names[original_frame_idx] if original_frame_idx < len(file_names) else fn
                 
-                # Use attention image if available, otherwise fall back to original frame
+                # Use attention image if available and not in "no_overlay" or "frame_importance" mode, otherwise fall back to original frame
                 # Use original_frame_idx to look up in attention_frame_map (which uses original indices)
-                if original_frame_idx in attention_frame_map:
+                if viz_type == "no_overlay" or viz_type == "frame_importance":
+                    # Always use original frame in "no_overlay" or "frame_importance" mode
+                    if image_root:
+                        img_path = os.path.join(image_root, original_fn)
+                        # Use original frame index (1-based)
+                        display_frame_num = original_frame_idx + 1
+                    else:
+                        print(f"    Warning: No image_root available for frame {frame_idx}, skipping")
+                        continue
+                elif original_frame_idx in attention_frame_map:
                     img_path = attention_frame_map[original_frame_idx]
                     # Extract frame number from PNG filename (1-based)
                     png_frame_num = extract_frame_number_from_png_filename(img_path, video_id, layer_idx, viz_type=viz_type)
@@ -828,17 +984,29 @@ def _visualize_predictions_for_scale(attention_dir, val_json_path, scale,
                 draw_small_top_right_label(frame, folder_name)
                 
                 # Draw mask outline only if NOT reordering (when reordering, masks go on original frames only)
-                if not reorder:
+                # For "no_overlay" and "frame_importance" modes, always draw masks since we're using original frames
+                if not reorder or viz_type == "no_overlay" or viz_type == "frame_importance":
                     # Draw mask outline (masks are already at correct dimensions)
                     # fn is already the reordered filename, so we can use it directly with frame_masks
                     for mask, color in frame_masks.get(fn, []):
                         draw_mask_outline(frame, mask, color)
                 
+                # For frame_importance mode, create side-by-side layout
+                if viz_type == "frame_importance":
+                    # Create the frame importance plot with accumulating red background
+                    # Use original_frame_idx (0-based) to determine which frames should have red background
+                    plot_image = create_frame_importance_plot(importance_arr, original_frame_idx, height, width)
+                    
+                    # Combine left (video) and right (plot) side-by-side
+                    combined_frame = np.hstack([frame, plot_image])
+                else:
+                    combined_frame = frame
+                
                 if out is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame.shape[1], frame.shape[0]))
+                    out = cv2.VideoWriter(output_video_path, fourcc, fps, (output_width, output_height))
                 
-                out.write(frame)
+                out.write(combined_frame)
                 
                 # If reordering, also add the original frame right after the attention frame
                 if reorder and image_root and original_frame_idx in attention_frame_map:
@@ -1154,9 +1322,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--viz-type",
         type=str,
-        choices=["heatmap", "grid", "grid_heatmap", "heatmap_num"],
+        choices=["heatmap", "grid", "grid_heatmap", "heatmap_num", "no_overlay", "frame_importance"],
         default="grid_heatmap",
-        help="Visualization type to look for in attention image filenames: 'heatmap', 'grid', 'grid_heatmap', or 'heatmap_num' (default: grid_heatmap)"
+        help="Visualization type to look for in attention image filenames: 'heatmap', 'grid', 'grid_heatmap', 'heatmap_num', 'no_overlay' (no attention overlay, uses original frames), or 'frame_importance' (side-by-side video with frame importance plot). Default: grid_heatmap"
     )
     parser.add_argument(
         "--layer",
