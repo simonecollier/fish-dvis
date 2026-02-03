@@ -14,19 +14,29 @@ def decode_rle(rle_obj, height, width):
 
 def draw_label_and_mask(frame, mask, label, score, color):
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(frame, contours, -1, color, thickness=2)
+    cv2.drawContours(frame, contours, -1, color, thickness=4)  # Increased thickness for better visibility
     
     # Get label position from the first contour
     if contours:
         x, y, _, _ = cv2.boundingRect(contours[0])
+        # Draw text with background for better visibility
+        text = f"{label} {score:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8  # Slightly larger font
+        thickness = 3  # Increased thickness
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        
+        # Draw background rectangle for text
+        cv2.rectangle(frame, (x - 3, y - text_height - 8), (x + text_width + 3, y + 3), (0, 0, 0), -1)
+        
         cv2.putText(
             frame,
-            f"{label} {score:.2f}",
+            text,
             (x, y - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            font,
+            font_scale,
             color,
-            2,
+            thickness,
             lineType=cv2.LINE_AA
         )
 
@@ -86,9 +96,38 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
     for video_id in true_species_by_video:
         true_species_by_video[video_id] = ", ".join(list(set(true_species_by_video[video_id])))
 
-    # Choose color per category
+    # Choose color per category - using vibrant, standout colors
+    # Bright colors that stand out: cyan, magenta, yellow, lime green, orange, bright blue, pink, etc.
+    vibrant_colors = [
+        (0, 255, 255),    # Cyan
+        (255, 0, 255),    # Magenta
+        (255, 255, 0),    # Yellow
+        (0, 255, 0),      # Lime Green
+        (255, 165, 0),    # Orange
+        (0, 0, 255),      # Bright Blue
+        (255, 0, 0),      # Red
+        (255, 20, 147),   # Deep Pink
+        (0, 191, 255),    # Deep Sky Blue
+        (255, 140, 0),    # Dark Orange
+        (50, 205, 50),    # Lime Green
+        (255, 215, 0),    # Gold
+        (138, 43, 226),   # Blue Violet
+        (255, 69, 0),     # Red Orange
+        (0, 250, 154),    # Medium Spring Green
+        (255, 105, 180),  # Hot Pink
+        (30, 144, 255),   # Dodger Blue
+        (255, 20, 147),   # Deep Pink
+        (124, 252, 0),    # Lawn Green
+        (255, 165, 0),    # Orange
+    ]
+    
+    # Assign colors to categories, cycling through the vibrant colors if there are more categories
     np.random.seed(42)
-    category_colors = {cat_id: tuple(np.random.randint(0, 256, 3).tolist()) for cat_id in categories}
+    category_ids = sorted(categories.keys())
+    category_colors = {}
+    for idx, cat_id in enumerate(category_ids):
+        color_idx = idx % len(vibrant_colors)
+        category_colors[cat_id] = vibrant_colors[color_idx]
 
     # Group ALL predictions by video_id (before filtering by threshold)
     all_preds_by_video = {}
@@ -226,9 +265,9 @@ def visualize_predictions(results_json, valid_json, image_root, output_dir, scor
         print("\nAll videos with predictions were successfully processed and saved.")
 
 if __name__ == "__main__":
-    results_json = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/scrambled_fold2/eval_5655_all_frames_seed6/inference/results.json"
-    valid_json = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/scrambled_fold2/eval_5655_all_frames_seed6/val.json"
+    results_json = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/attention/fold6_4443_attn_extra/inference/results.json"
+    valid_json = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/attention/fold6_4443_attn_extra/val_fold6_all_frames.json"
     image_root = "/data/fishway_ytvis/all_videos_mask"
-    output_dir = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/scrambled_fold2/eval_5655_all_frames_seed6/inference/video_predictions"
+    output_dir = "/home/simone/store/simone/dvis-model-outputs/top_fold_results/silhouette/attention/fold6_4443_attn_extra/inference/video_predictions"
 
     visualize_predictions(results_json, valid_json, image_root, output_dir, score_thresh=0)
