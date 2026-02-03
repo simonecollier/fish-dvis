@@ -2,7 +2,9 @@
 
 ### 1. Data Prep
 i. Convert coco fishway dataset into ytvis dataset using [`01_convert_coco_to_ytvis.py`](data_scripts/01_convert_coco_to_ytvis.py). Change the hardcoded paths at the bottom of the script.
+
 ii. [`03_create_train_val_jsons.py`](data_scripts/03_create_train_val_jsons.py)
+
 iii. [`04_validate_ytvis.py`](data_scripts/04_validate_ytvis.py)
 
 ### 2. Configure Your Experiment
