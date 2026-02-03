@@ -27,8 +27,8 @@ python /home/simone/fish-dvis/attention_analysis/summarize_activation_proj.py "$
 python /home/simone/fish-dvis/attention_analysis/summarize_tracker_attn.py "${ATTENTION_DIR}"
 
 # Plot decoder attention
-python /home/simone/fish-dvis/attention_analysis/plot_decoder_attn.py "${ATTENTION_DIR}" --colour-scale per_frame
-python /home/simone/fish-dvis/attention_analysis/plot_decoder_attn.py "${ATTENTION_DIR}" --colour-scale temporal_per_frame
+python /home/simone/fish-dvis/attention_analysis/plot_decoder_attn.py "${ATTENTION_DIR}" --scale per_frame
+python /home/simone/fish-dvis/attention_analysis/plot_decoder_attn.py "${ATTENTION_DIR}" --scale temporal_per_frame
 
 # Create videos of prediction and attention
 python /home/simone/fish-dvis/attention_analysis/pred_vids_attn.py "${ATTENTION_DIR}"
