@@ -2,14 +2,7 @@
 """
 Batch wrapper to create multiple scrambled versions of validation JSON files.
 
-This script creates 10 scrambled versions (seeds 1-10) for each fold (1-6)
-of the validation data.
-
-Usage:
-    python batch_scramble_folds.py [--folds FOLDS] [--seeds SEEDS] [--base-dir DIR] [--verify]
-    
-Example:
-    python batch_scramble_folds.py --folds 1,2,3,4,5,6 --seeds 1,2,3,4,5,6,7,8,9,10
+This script creates 100 scrambled versions (seeds 1-100) for a single validation file.
 """
 
 import subprocess
@@ -59,51 +52,57 @@ def run_scramble(input_json, output_json, seed, verify=False):
         return False
 
 
-def batch_scramble_folds(base_dir, folds, seeds, verify=False):
+def batch_scramble_single_file(input_file, output_base_dir, seeds, dir_pattern=None, verify=False):
     """
-    Create scrambled versions for multiple folds and seeds.
+    Create scrambled versions for a single file with multiple seeds.
     
     Args:
-        base_dir: Base directory containing the validation JSON files
-        folds: List of fold numbers (e.g., [1, 2, 3, 4, 5, 6])
-        seeds: List of seed values (e.g., [1, 2, ..., 10])
+        input_file: Path to input JSON file
+        output_base_dir: Base directory for output files
+        seeds: List of seed values (e.g., [1, 2, ..., 100])
+        dir_pattern: Pattern for output directory name, with {seed} placeholder (e.g., "eval_443_all_frames_{seed}")
         verify: Whether to verify each scrambling
     """
-    base_path = Path(base_dir)
+    input_path = Path(input_file)
+    output_base = Path(output_base_dir)
     
-    total_tasks = len(folds) * len(seeds)
+    if not input_path.exists():
+        print(f"Error: Input file not found: {input_path}")
+        return 1
+    
+    # Create output base directory if it doesn't exist
+    output_base.mkdir(parents=True, exist_ok=True)
+    
+    # Default directory pattern if not provided
+    if dir_pattern is None:
+        dir_pattern = "eval_6059_edit91_seed{seed}"
+    
+    total_tasks = len(seeds)
     completed = 0
     failed = 0
     
     print(f"Starting batch scrambling:")
-    print(f"  Folds: {folds}")
-    print(f"  Seeds: {seeds}")
-    print(f"  Total tasks: {total_tasks}")
+    print(f"  Input file: {input_path}")
+    print(f"  Output base: {output_base}")
+    print(f"  Directory pattern: {dir_pattern}")
+    print(f"  Seeds: {seeds[0]} to {seeds[-1]} ({total_tasks} total)")
     print()
     
-    for fold in folds:
-        # Construct input file path
-        input_file = base_path / f"val_fold{fold}_all_frames.json"
+    for seed in seeds:
+        # Construct output directory and file path
+        dir_name = dir_pattern.format(seed=seed)
+        output_dir = output_base / dir_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / "val.json"
         
-        if not input_file.exists():
-            print(f"⚠ Warning: Input file not found: {input_file}")
-            print(f"  Skipping fold {fold}")
-            continue
+        print(f"  Seed {seed}: {input_path.name} -> {output_file}")
         
-        print(f"Processing fold {fold}...")
+        if run_scramble(input_path, output_file, seed, verify):
+            completed += 1
+        else:
+            failed += 1
         
-        for seed in seeds:
-            # Construct output file path
-            output_file = base_path / f"val_fold{fold}_all_frames_scrambled_seed{seed}.json"
-            
-            print(f"  Seed {seed}: {input_file.name} -> {output_file.name}")
-            
-            if run_scramble(input_file, output_file, seed, verify):
-                completed += 1
-            else:
-                failed += 1
-            
-            print()  # Blank line between tasks
+        print()  # Blank line between tasks
     
     print("=" * 60)
     print(f"Batch scrambling completed!")
@@ -117,43 +116,36 @@ def batch_scramble_folds(base_dir, folds, seeds, verify=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Batch create scrambled versions of validation JSON files for multiple folds',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Create 10 scrambles (seeds 1-10) for all folds (1-6)
-  python batch_scramble_folds.py
-  
-  # Create scrambles for specific folds
-  python batch_scramble_folds.py --folds 1,2,3
-  
-  # Create more scrambles with different seeds
-  python batch_scramble_folds.py --seeds 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-  
-  # Verify each scrambling
-  python batch_scramble_folds.py --verify
-        """
+        description='Batch create scrambled versions of a validation JSON file',
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     parser.add_argument(
-        '--base-dir',
+        '--input-file',
         type=str,
-        default='/home/simone/shared-data/fishway_ytvis',
-        help='Base directory containing validation JSON files (default: /home/simone/shared-data/fishway_ytvis)'
+        default='/home/simone/shared-data/fishway_ytvis/val_fold6_all_frames_edit91.json',
+        help='Input JSON file to scramble (default: /home/simone/shared-data/fishway_ytvis/val_fold6_all_frames_edit91.json)'
     )
     
     parser.add_argument(
-        '--folds',
+        '--output-base-dir',
         type=str,
-        default='1,2,3,4,5,6',
-        help='Comma-separated list of fold numbers (default: 1,2,3,4,5,6)'
+        default='/home/simone/store/simone/dvis-model-outputs/top_fold_results/camera/scrambled_fold6',
+        help='Base directory for output files (default: /home/simone/store/simone/dvis-model-outputs/top_fold_results/camera/scrambled_fold6)'
     )
     
     parser.add_argument(
         '--seeds',
         type=str,
-        default='1,2,3,4,5,6,7,8,9,10',
-        help='Comma-separated list of seed values (default: 1,2,3,4,5,6,7,8,9,10)'
+        default=','.join(map(str, range(1, 101))),
+        help='Comma-separated list of seed values (default: 1-100)'
+    )
+    
+    parser.add_argument(
+        '--dir-pattern',
+        type=str,
+        default=None,
+        help='Pattern for output directory name with {seed} placeholder (e.g., "eval_443_all_frames_{seed}")'
     )
     
     parser.add_argument(
@@ -164,23 +156,16 @@ Examples:
     
     args = parser.parse_args()
     
-    # Parse folds and seeds
+    # Parse seeds
     try:
-        folds = [int(f.strip()) for f in args.folds.split(',')]
         seeds = [int(s.strip()) for s in args.seeds.split(',')]
     except ValueError as e:
-        print(f"Error: Invalid format for folds or seeds. Use comma-separated integers.")
-        print(f"  Example: --folds 1,2,3 --seeds 1,2,3,4,5")
-        return 1
-    
-    # Check base directory exists
-    base_path = Path(args.base_dir)
-    if not base_path.exists():
-        print(f"Error: Base directory does not exist: {base_path}")
+        print(f"Error: Invalid format for seeds. Use comma-separated integers.")
+        print(f"  Example: --seeds 1,2,3,4,5")
         return 1
     
     # Run batch scrambling
-    return batch_scramble_folds(args.base_dir, folds, seeds, args.verify)
+    return batch_scramble_single_file(args.input_file, args.output_base_dir, seeds, args.dir_pattern, args.verify)
 
 
 if __name__ == "__main__":
