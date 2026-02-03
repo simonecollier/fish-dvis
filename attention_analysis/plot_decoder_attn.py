@@ -1005,7 +1005,8 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                             query_choice: str = "top",
                             scale: str = "per_frame",
                             temporal_attention_weights: Optional[np.ndarray] = None,
-                            viz_type: str = "grid_heatmap"):
+                            viz_type: str = "grid_heatmap",
+                            filter_frames: Optional[List[int]] = None):
     """
     Plot attention maps for queries across multiple layers, using per-frame query IDs.
     
@@ -1153,11 +1154,20 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
             print(f"Adjusted: H_feat={H_feat}, W_feat={W_feat}")
         
         # Collect all attention maps first (needed for across_frames scaling modes)
+        # If filter_frames is specified, we still need to compute all frames for across_frames scaling
+        # but for per_frame scaling we can skip non-filtered frames
         all_attention_2d_maps = [None] * num_frames  # Indexed by frame_idx
         query_ids_by_frame_idx = [None] * num_frames  # Store query IDs for filename generation, indexed by frame_idx
         
         for frame_idx in range(num_frames):
             absolute_frame_num = frame_start + frame_idx
+            
+            # Skip frames that are not in the filter list (if filter is specified)
+            # For per_frame scaling, we can skip computation entirely
+            # For across_frames scaling, we'll compute min/max only from filtered frames
+            if filter_frames is not None and absolute_frame_num not in filter_frames:
+                continue
+            
             frame_key = str(absolute_frame_num)
             
             # Determine if we should plot attention for this frame
@@ -1177,6 +1187,22 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
                     query_id_for_frame = int(frame_value)
                     if query_id_for_frame < num_queries:
                         should_plot_attention = True
+            elif absolute_frame_num == 0:
+                # Fallback for frame 0: use frame 1's query ID/weights if available
+                # This handles cases where tracker_attention_top5.json doesn't include frame 0
+                fallback_frame_key = "1"
+                if predictor_query_ids_by_frame is not None and fallback_frame_key in predictor_query_ids_by_frame:
+                    frame_value = predictor_query_ids_by_frame[fallback_frame_key]
+                    
+                    if query_choice == "weighted_sum":
+                        if isinstance(frame_value, np.ndarray):
+                            tracker_attention_weights_for_frame = frame_value
+                            if len(tracker_attention_weights_for_frame) == num_queries:
+                                should_plot_attention = True
+                    else:
+                        query_id_for_frame = int(frame_value)
+                        if query_id_for_frame < num_queries:
+                            should_plot_attention = True
             
             if should_plot_attention:
                 # Compute attention map for this frame
@@ -1280,6 +1306,10 @@ def plot_attention_for_query(attn_dir: str, output_dir: str, video_id: int,
         for frame_idx in range(num_frames):
             # Calculate the absolute frame number (frame_start + frame_idx)
             absolute_frame_num = frame_start + frame_idx
+            
+            # Skip frames that are not in the filter list (if filter is specified)
+            if filter_frames is not None and absolute_frame_num not in filter_frames:
+                continue
             
             # Load frame if available
             if frames and frame_idx < len(frames) and frames[frame_idx] is not None:
@@ -1563,6 +1593,13 @@ def main():
         default="grid_heatmap",
         help="Visualization type: 'heatmap' overlays attention as colored heatmap with interpolation, 'grid' plots patches as red square outlines with thickness corresponding to attention, 'grid_heatmap' plots colored patches with Gaussian blur for smooth gradients (default), 'heatmap_num' same as grid_heatmap but includes attention values (×100, no decimals) as text labels"
     )
+    parser.add_argument(
+        "--frames",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Only process specific frame numbers (e.g., --frames 0 1 2). If not specified, processes all frames in the window."
+    )
     
     args = parser.parse_args()
     
@@ -1834,7 +1871,8 @@ def main():
                 query_choice=args.query_choice,
                 scale=args.scale,
                 temporal_attention_weights=temporal_attention_weights,
-                viz_type=args.viz_type
+                viz_type=args.viz_type,
+                filter_frames=args.frames
             )
     
     print(f"\nDone! Plots saved to {output_dir}")
