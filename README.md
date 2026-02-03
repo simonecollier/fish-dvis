@@ -6,25 +6,25 @@ This repository contains code for my Master's thesis project used for training, 
 
 This project involved training the DVIS-DAQ model to classify salmonid species from camera videos and transformed videos that only display the silhouette of the fish.
 
-![](demo_images/data_comparison.gif)
+<img src="demo_images/data_comparison.gif" alt="data comparison" width="100%">
 
 The camera model performed much better than the silhouette model, but both performed adequately.
 
-![](demo_images/pred_masks.gif)
+<img src="demo_images/pred_masks.gif" alt="prediction masks" width="100%">
 
-![](demo_images/performance.png)
+<img src="demo_images/performance.png" alt="performance" width="100%">
 
 I analyzed which frames from each video were most important for classification for each model type.
 
-![](demo_images/jsd1.png)
+<img src="demo_images/jsd1.png" alt="jsd" width="100%">
 
 I also examined spatial attention maps to understand which fish features receive the most attention across each species.
 
-![](demo_images/compare_attn.png)
+<img src="demo_images/compare_attn.png" alt="compare attention" width="100%">
 
-![](demo_images/camera_attn.png)
+<img src="demo_images/camera_attn.png" alt="camera attention" width="100%">
 
-![](demo_images/silhouette_attn.png)
+<img src="demo_images/silhouette_attn.png" alt="silhouette attention" width="100%">
 
 ## Directory Structure
 
