@@ -1,66 +1,30 @@
 # fish-dvis
 
-This repository contains code for my Master's thesis project used for training, evaluating, and analyzing a deep learning model's use of temporal and spatial information when classifying fish species from videos. The repository [LO_Fishway_Labelling](https://github.com/simonecollier/LO_Fishway_Labelling) contains the code and custom tools I developed for labelling the fish videos. This porject uses the DVIS-DAQ model and thus builds upon the [DVIS_Plus](https://github.com/zhang-tao-whu/DVIS_Plus) repository, leveraging its advanced video segmentation capabilities and extending them for the task of fish species classification.
+This repository contains code for my Master's thesis project used for training, evaluating, and analyzing how a deep learning model uses temporal and spatial information when classifying fish species from videos. The repository [LO_Fishway_Labelling](https://github.com/simonecollier/LO_Fishway_Labelling) contains the code and custom tools I developed for labelling the fish videos. This project uses the DVIS-DAQ model and builds upon the [DVIS_Plus](https://github.com/zhang-tao-whu/DVIS_Plus) repository.
 
-## Visual demos
+## Project Overview
 
-### Prediction overlays (qualitative)
+This project involved training the DVIS-DAQ model to classify salmonid species from camera videos and transformed videos that only display the silhouette of the fish.
 
-<p align="center">
-  <img src="demo_images/pred_masks.gif" width="800" alt="Predicted instance masks overlaid on video frames">
-</p>
-<p align="center">
-  <em>Predicted instance masks overlaid on fishway video frames (qualitative examples).</em>
-</p>
+![](demo_images/data_comparison.gif)
 
-### Dataset / labeling comparison
+The camera model performed much better than the silhouette model, but both performed adequately.
 
-<p align="center">
-  <img src="demo_images/data_comparison.gif" width="800" alt="Dataset / labeling comparison visualization">
-</p>
-<p align="center">
-  <em>Example visualization comparing dataset variants / labeling conventions used in this project.</em>
-</p>
+![](demo_images/pred_masks.gif)
 
-### Attention + temporal analysis (examples)
+![](demo_images/performance.png)
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="demo_images/compare_attn.png" width="420" alt="Attention comparison figure">
-      <br />
-      <em>Comparing attention visualizations across conditions.</em>
-    </td>
-    <td align="center" width="50%">
-      <img src="demo_images/camera_attn.png" width="420" alt="Camera attention visualization">
-      <br />
-      <em>Example “camera” attention map visualization.</em>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="demo_images/silhouette_attn.png" width="420" alt="Silhouette attention visualization">
-      <br />
-      <em>Example “silhouette” attention map visualization.</em>
-    </td>
-    <td align="center" width="50%">
-      <img src="demo_images/jsd1.png" width="420" alt="Jensen–Shannon divergence plot">
-      <br />
-      <em>Example distribution comparison plot (e.g., Jensen–Shannon divergence).</em>
-    </td>
-  </tr>
-</table>
+I analyzed which frames from each video were most important for classification for each model type.
 
-### Performance snapshot
+![](demo_images/jsd1.png)
 
-<p align="center">
-  <img src="demo_images/performance.png" width="900" alt="Performance summary plot">
-</p>
-<p align="center">
-  <em>High-level performance summary for one representative experiment.</em>
-</p>
+I also examined spatial attention maps to understand which fish features receive the most attention across each species.
 
+![](demo_images/compare_attn.png)
 
+![](demo_images/camera_attn.png)
+
+![](demo_images/silhouette_attn.png)
 
 ## Directory Structure
 
