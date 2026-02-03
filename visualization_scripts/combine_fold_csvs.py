@@ -11,6 +11,7 @@ import os
 import sys
 import pandas as pd
 import numpy as np
+import re
 from pathlib import Path
 from glob import glob
 
@@ -22,6 +23,14 @@ def find_inference_dir(fold_dir):
         # Return the first one found (assuming one checkpoint per fold)
         return checkpoint_dirs[0]
     return None
+
+def is_valid_fold_dir(dir_path):
+    """Check if directory is a valid fold directory (fold followed by digits only)."""
+    if not dir_path.is_dir():
+        return False
+    name = dir_path.name
+    # Match pattern: "fold" followed by one or more digits, nothing else
+    return bool(re.match(r'^fold\d+$', name))
 
 def combine_csvs(base_dir, output_dir):
     """Combine CSV files from all folds."""
@@ -38,9 +47,8 @@ def combine_csvs(base_dir, output_dir):
         "mask_metrics.csv"
     ]
     
-    # Find all fold directories (exclude folds_summary)
-    fold_dirs = sorted([d for d in base_path.iterdir() 
-                       if d.is_dir() and d.name.startswith("fold") and d.name != "folds_summary"])
+    # Find all fold directories (only directories matching "fold" followed by digits)
+    fold_dirs = sorted([d for d in base_path.iterdir() if is_valid_fold_dir(d)])
     
     print(f"Found {len(fold_dirs)} fold directories")
     
@@ -50,8 +58,13 @@ def combine_csvs(base_dir, output_dir):
         combined_data = []
         
         for fold_dir in fold_dirs:
-            # Extract fold number
-            fold_num = int(fold_dir.name.replace("fold", ""))
+            # Extract fold number (should be safe since we filtered for valid fold dirs)
+            match = re.match(r'^fold(\d+)$', fold_dir.name)
+            if match:
+                fold_num = int(match.group(1))
+            else:
+                print(f"  Warning: Could not extract fold number from {fold_dir.name}, skipping")
+                continue
             
             # Find inference directory
             inference_dir = find_inference_dir(fold_dir)
@@ -93,16 +106,21 @@ def create_summary_stats(base_dir, output_dir):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Find all fold directories (exclude folds_summary)
-    fold_dirs = sorted([d for d in base_path.iterdir() 
-                       if d.is_dir() and d.name.startswith("fold") and d.name != "folds_summary"])
+    # Find all fold directories (only directories matching "fold" followed by digits)
+    fold_dirs = sorted([d for d in base_path.iterdir() if is_valid_fold_dir(d)])
     
     # Process mask_metrics_dataset.csv
     print("\nCreating summary for mask_metrics_dataset.csv...")
     dataset_data = []
     
     for fold_dir in fold_dirs:
-        fold_num = int(fold_dir.name.replace("fold", ""))
+        # Extract fold number (should be safe since we filtered for valid fold dirs)
+        match = re.match(r'^fold(\d+)$', fold_dir.name)
+        if match:
+            fold_num = int(match.group(1))
+        else:
+            print(f"  Warning: Could not extract fold number from {fold_dir.name}, skipping")
+            continue
         inference_dir = find_inference_dir(fold_dir)
         if inference_dir is None:
             continue
@@ -153,7 +171,13 @@ def create_summary_stats(base_dir, output_dir):
     category_data = []
     
     for fold_dir in fold_dirs:
-        fold_num = int(fold_dir.name.replace("fold", ""))
+        # Extract fold number (should be safe since we filtered for valid fold dirs)
+        match = re.match(r'^fold(\d+)$', fold_dir.name)
+        if match:
+            fold_num = int(match.group(1))
+        else:
+            print(f"  Warning: Could not extract fold number from {fold_dir.name}, skipping")
+            continue
         inference_dir = find_inference_dir(fold_dir)
         if inference_dir is None:
             continue
