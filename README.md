@@ -6,40 +6,47 @@ This repository contains code for my Master's thesis project used for training, 
 
 This project trains and evaluates a DVIS-DAQ–based video model to classify salmonid species from fishway videos, with a focus on understanding how temporal and spatial cues contribute to predictions. Experiments are run on two input variants: standard camera footage and transformed silhouette-only footage. In addition to performance evaluation, the repo includes scripts to analyze which frames are most informative for classification and to visualize spatial attention patterns.
 
-<figure>
+<p>
   <img src="demo_images/data_comparison.gif" alt="Camera vs silhouette data comparison" width="100%">
-  <figcaption><em>Camera footage vs silhouette-only transformed footage used in this project.</em></figcaption>
-</figure>
+  <br>
+  <em>Camera footage vs silhouette-only transformed footage used in this project.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/pred_masks.gif" alt="Predicted instance masks overlay" width="100%">
-  <figcaption><em>Example qualitative predictions: instance masks overlaid on video frames.</em></figcaption>
-</figure>
+  <br>
+  <em>Example qualitative predictions: instance masks overlaid on video frames.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/performance.png" alt="Performance summary" width="100%">
-  <figcaption><em>Performance summary for camera and silhouette models.</em></figcaption>
-</figure>
+  <br>
+  <em>Performance summary for camera and silhouette models.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/jsd1.png" alt="Temporal importance / distribution comparison" width="100%">
-  <figcaption><em>Plots showing frame importance distributions for the camera and silhouette model for two example videos.</em></figcaption>
-</figure>
+  <br>
+  <em>Plots showing frame importance distributions for the camera and silhouette model for two example videos.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/compare_attn.png" alt="Aggregated attention comparison" width="100%">
-  <figcaption><em>Example showing spatial attention overlaid on a video frame for each model.</em></figcaption>
-</figure>
+  <br>
+  <em>Example showing spatial attention overlaid on a video frame for each model.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/camera_attn.png" alt="Camera attention map" width="100%">
-  <figcaption><em>Aggregated spatial attention map for the camera model showing the average attention on each fish feature for each species.</em></figcaption>
-</figure>
+  <br>
+  <em>Aggregated spatial attention map for the camera model showing the average attention on each fish feature for each species.</em>
+</p>
 
-<figure>
+<p>
   <img src="demo_images/silhouette_attn.png" alt="Silhouette attention map" width="100%">
-  <figcaption><em>Aggregated spatial attention map for the silhouette model showing the average attention on each fish feature for each species.</em></figcaption>
-</figure>
+  <br>
+  <em>Aggregated spatial attention map for the silhouette model showing the average attention on each fish feature for each species.</em>
+</p>
 
 ## Directory Structure
 
