@@ -1,33 +1,101 @@
 # fish-dvis
 
-This repository is designed for training video instance segmentation models on custom video datasets, specifically for classifying fish species in underwater videos. It builds upon the [DVIS_Plus](https://github.com/zhang-tao-whu/DVIS_Plus) repository, leveraging its advanced video segmentation capabilities and extending them for the task of fish species classification.
+This repository contains code for my Master's thesis project used for training, evaluating, and analyzing a deep learning model's use of temporal and spatial information when classifying fish species from videos. The repository [LO_Fishway_Labelling](https://github.com/simonecollier/LO_Fishway_Labelling) contains the code and custom tools I developed for labelling the fish videos. This porject uses the DVIS-DAQ model and thus builds upon the [DVIS_Plus](https://github.com/zhang-tao-whu/DVIS_Plus) repository, leveraging its advanced video segmentation capabilities and extending them for the task of fish species classification.
 
-## Overview
+## Visual demos
 
-- **Base Model:** The core segmentation and tracking functionality is provided by the DVIS_Plus repo (included as a subdirectory).
-- **Custom Training:** This repo provides scripts and utilities for preparing your own video data, configuring experiments, and training models to classify fish species in videos.
+### Prediction overlays (qualitative)
+
+<p align="center">
+  <img src="demo_images/pred_masks.gif" width="800" alt="Predicted instance masks overlaid on video frames">
+</p>
+<p align="center">
+  <em>Predicted instance masks overlaid on fishway video frames (qualitative examples).</em>
+</p>
+
+### Dataset / labeling comparison
+
+<p align="center">
+  <img src="demo_images/data_comparison.gif" width="800" alt="Dataset / labeling comparison visualization">
+</p>
+<p align="center">
+  <em>Example visualization comparing dataset variants / labeling conventions used in this project.</em>
+</p>
+
+### Attention + temporal analysis (examples)
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="demo_images/compare_attn.png" width="420" alt="Attention comparison figure">
+      <br />
+      <em>Comparing attention visualizations across conditions.</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="demo_images/camera_attn.png" width="420" alt="Camera attention visualization">
+      <br />
+      <em>Example “camera” attention map visualization.</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="demo_images/silhouette_attn.png" width="420" alt="Silhouette attention visualization">
+      <br />
+      <em>Example “silhouette” attention map visualization.</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="demo_images/jsd1.png" width="420" alt="Jensen–Shannon divergence plot">
+      <br />
+      <em>Example distribution comparison plot (e.g., Jensen–Shannon divergence).</em>
+    </td>
+  </tr>
+</table>
+
+### Performance snapshot
+
+<p align="center">
+  <img src="demo_images/performance.png" width="900" alt="Performance summary plot">
+</p>
+<p align="center">
+  <em>High-level performance summary for one representative experiment.</em>
+</p>
+
+
 
 ## Directory Structure
+
+See READMEs in each subdirectory for more information on specific scripts.
 
 - **DVIS_Plus/**  
   Contains the original DVIS_Plus codebase.
 
 - **data_scripts/**  
-  Scripts and utilities for preparing and processing your video dataset.  
-  Example contents:
-  - `fishway_convert_ytvis_train.py`, `save_ytvis_json.py`, `create_valid_json.py`: Convert and prepare your fish video data into the required format.
-  - `register_datasets.py`, `ytvis_loader.py`: Register and load datasets for training and evaluation.
-  - `fishway_metadata.csv`: Metadata about your fish video dataset.
-  - `delete_pycache.py`: Utility to clean up Python cache files.
+  Scripts and utilities for preparing and processing the labeled fishway video dataset.
 
 - **configs/**  
   Configuration files for training experiments.  
-  Example:
-  - `DAQ_Offline_VitAdapterL_fishway.yaml`: Example config for training on the fishway dataset.
 
-## Scripts Overview
+- **training_scripts/**
+  Contains scripts for training and evaluating the DVIS-DAQ model on the fsihway dataset.
 
-### Training Scripts (`training_scripts/`)
+- **visualization_scripts/**
+  Contains scripts for visualizing model results and other miscellaneous visualizations.
+
+- **temporal_analysis/**
+  Contains scripts for analyzing temporal information utilization of the model.
+
+- **attention_analysis/**
+  Contains scripts for extracting values from internal model components during inference and scripts for analyzing these results.
+
+## General Usage
+
+### 1. Data Prep
+Use the scripts in `data_scripts/` to convert and register the fish video dataset.
+
+### 2. Configure Your Experiment
+Edit or create a config file in `configs/` to specify model parameters, dataset paths, and training options.
+
+### 3. Train Your Model
 
 #### Core Training Scripts
 - **`train_net_video.py`**: Main training script for video segmentation models
